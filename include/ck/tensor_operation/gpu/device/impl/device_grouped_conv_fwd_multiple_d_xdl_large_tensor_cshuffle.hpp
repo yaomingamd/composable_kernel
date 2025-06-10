@@ -89,7 +89,7 @@ __global__ void
         group_id = index_t((left + right) / 2);
     }
 
-    GridwiseGemm::template Run<HasMainKBlockLoop, InMemoryDataOperationEnum::Set>(
+    GridwiseGemm::template Run<HasMainKBlockLoop>(
         gemm_desc_kernel_args[group_id].a_ptr_ + a_group_offset + a_n_offset,
         gemm_desc_kernel_args[group_id].b_ptr_ + b_group_offset,
         Tuple<>{},
@@ -350,15 +350,16 @@ struct DeviceGroupedConvFwdMultipleD_Xdl_CShuffle_Large_Tensor
 #define GridwiseGemmTemplateParameters                                                            \
     ADataType, BDataType, AComputeDataType, AccDataType, CShuffleDataType, DsDataType, EDataType, \
         AElementwiseOperation, BElementwiseOperation, CDEElementwiseOperation,                    \
-        NumGemmKPrefetchStage, BlockSize, MPerBlock, NPerBlock, KPerBlock, AK1, BK1, MPerXDL,     \
-        NPerXDL, MXdlPerWave, NXdlPerWave, ABlockTransferThreadClusterLengths_AK0_M_AK1,          \
-        ABlockTransferThreadClusterArrangeOrder, ABlockTransferSrcAccessOrder,                    \
-        ABlockTransferSrcVectorDim, ABlockTransferSrcScalarPerVector,                             \
-        ABlockTransferDstScalarPerVector_AK1, false, ABlockLdsExtraM,                             \
-        BBlockTransferThreadClusterLengths_BK0_N_BK1, BBlockTransferThreadClusterArrangeOrder,    \
-        BBlockTransferSrcAccessOrder, BBlockTransferSrcVectorDim,                                 \
-        BBlockTransferSrcScalarPerVector, BBlockTransferDstScalarPerVector_BK1, false,            \
-        BBlockLdsExtraN, CShuffleMXdlPerWavePerShuffle, CShuffleNXdlPerWavePerShuffle,            \
+        InMemoryDataOperationEnum::Set, NumGemmKPrefetchStage, BlockSize, MPerBlock, NPerBlock,   \
+        KPerBlock, AK1, BK1, MPerXDL, NPerXDL, MXdlPerWave, NXdlPerWave,                          \
+        ABlockTransferThreadClusterLengths_AK0_M_AK1, ABlockTransferThreadClusterArrangeOrder,    \
+        ABlockTransferSrcAccessOrder, ABlockTransferSrcVectorDim,                                 \
+        ABlockTransferSrcScalarPerVector, ABlockTransferDstScalarPerVector_AK1, false,            \
+        ABlockLdsExtraM, BBlockTransferThreadClusterLengths_BK0_N_BK1,                            \
+        BBlockTransferThreadClusterArrangeOrder, BBlockTransferSrcAccessOrder,                    \
+        BBlockTransferSrcVectorDim, BBlockTransferSrcScalarPerVector,                             \
+        BBlockTransferDstScalarPerVector_BK1, false, BBlockLdsExtraN,                             \
+        CShuffleMXdlPerWavePerShuffle, CShuffleNXdlPerWavePerShuffle,                             \
         CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock,                         \
         CDEBlockTransferScalarPerVector_NPerBlock, LoopSched, PipelineVersion::v1,                \
         AComputeDataType
@@ -934,8 +935,10 @@ struct DeviceGroupedConvFwdMultipleD_Xdl_CShuffle_Large_Tensor
         const std::array<index_t, NDimSpatial>& input_right_pads,
         const AElementwiseOperation& a_element_op,
         const BElementwiseOperation& b_element_op,
-        const CDEElementwiseOperation& cde_element_op) override
+        const CDEElementwiseOperation& cde_element_op,
+        const ck::index_t split_k) override
     {
+        (void)split_k;
 
         std::array<long_index_t, NDimSpatial + 3> a_g_n_c_wis_lengths_i64;
         std::array<long_index_t, NDimSpatial + 3> a_g_n_c_wis_strides_i64;
@@ -1008,8 +1011,10 @@ struct DeviceGroupedConvFwdMultipleD_Xdl_CShuffle_Large_Tensor
                         const std::array<long_index_t, NDimSpatial>& input_right_pads,
                         const AElementwiseOperation& a_element_op,
                         const BElementwiseOperation& b_element_op,
-                        const CDEElementwiseOperation& cde_element_op) override
+                        const CDEElementwiseOperation& cde_element_op,
+                        const ck::index_t split_k) override
     {
+        (void)split_k;
 
         return std::make_unique<Argument>(p_a,
                                           p_b,

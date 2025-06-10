@@ -21,7 +21,7 @@
 #include "ck/tensor_operation/gpu/device/device_grouped_conv_fwd_multiple_abd.hpp"
 #include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
 #include "ck/tensor_operation/gpu/device/matrix_padder.hpp"
-#include "ck/tensor_operation/gpu/grid/gridwise_gemm_xdl_cshuffle_v3.hpp"
+#include "ck/tensor_operation/gpu/grid/gridwise_gemm_xdl_cshuffle_conv_v3.hpp"
 #include "ck/tensor_operation/gpu/grid/gridwise_elementwise_2d.hpp"
 #include "ck/tensor_operation/gpu/device/impl/device_grouped_conv_utils.hpp"
 #include "ck/host_utility/device_prop.hpp"
@@ -80,12 +80,15 @@ __global__ void
             [[maybe_unused]] const CGridDesc_MBlock_MPerBlock_NBlock_NPerBlock
                 c_grid_desc_mblock_mperblock_nblock_nperblock,
             [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_groups,
-            [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_n)
+            [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_n,
+            [[maybe_unused]] const index_t num_k_per_block,
+            [[maybe_unused]] const index_t num_group)
 {
 #if(!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx9__))
     // offset base pointer for each work-group
-    const index_t g_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-    const index_t n_idx = __builtin_amdgcn_readfirstlane(blockIdx.z);
+    const index_t k_idx = __builtin_amdgcn_readfirstlane(blockIdx.y * num_k_per_block);
+    const index_t g_idx = __builtin_amdgcn_readfirstlane(blockIdx.z % num_group);
+    const index_t n_idx = __builtin_amdgcn_readfirstlane(blockIdx.z / num_group);
 
     const long_index_t a_batch_offset =
         amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetAPtrOffset(g_idx));
@@ -113,7 +116,8 @@ __global__ void
                                         karg,
                                         a_grid_desc_ak0_m_ak1,
                                         b_grid_desc_bk0_n_bk1,
-                                        c_grid_desc_mblock_mperblock_nblock_nperblock);
+                                        c_grid_desc_mblock_mperblock_nblock_nperblock,
+                                        k_idx);
 #else
     ignore = karg;
 #endif // end of if (defined(__gfx9__))
@@ -139,12 +143,16 @@ __global__ void
             [[maybe_unused]] const CGridDesc_MBlock_MPerBlock_NBlock_NPerBlock
                 c_grid_desc_mblock_mperblock_nblock_nperblock,
             [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_groups,
-            [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_n)
+            [[maybe_unused]] const ComputePtrOffset compute_ptr_offset_of_n,
+            [[maybe_unused]] const index_t num_k_per_block,
+            [[maybe_unused]] const index_t num_group)
 {
 #if(!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx9__))
     // offset base pointer for each work-group
-    const index_t g_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-    const index_t n_idx = __builtin_amdgcn_readfirstlane(blockIdx.z);
+    const index_t k_idx       = __builtin_amdgcn_readfirstlane(blockIdx.y * num_k_per_block);
+    const index_t combined_gz = __builtin_amdgcn_readfirstlane(blockIdx.z);
+    const index_t g_idx       = __builtin_amdgcn_readfirstlane(combined_gz % num_group);
+    const index_t n_idx       = __builtin_amdgcn_readfirstlane(combined_gz / num_group);
 
     const long_index_t a_batch_offset =
         amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetAPtrOffset(g_idx));
@@ -176,7 +184,8 @@ __global__ void
                                              karg,
                                              a_grid_desc_ak0_m_ak1,
                                              b_grid_desc_bk0_n_bk1,
-                                             c_grid_desc_mblock_mperblock_nblock_nperblock);
+                                             c_grid_desc_mblock_mperblock_nblock_nperblock,
+                                             k_idx);
 #else
     ignore = karg;
 #endif // end of if (defined(__gfx9__))
@@ -312,7 +321,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
 
     template <typename ALay>
     static auto
-    MakeAGridDescriptor_AK0_M_AK1(const ConvToGemmFwdTransformer& conv_to_gemm_transformer)
+    MakeAGridDescriptor_AK0_M_AK1(const ConvToGemmFwdTransformer& conv_to_gemm_transformer,
+                                  const index_t k_batch = 1)
 
     {
         namespace ctc = tensor_layout::convolution;
@@ -326,24 +336,38 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         const auto in_gemmmraw_gemmkraw_desc =
             conv_to_gemm_transformer.template MakeADescriptor_M_K<Layout>();
 
-        const auto in_gemmm_gemmk_desc =
-            matrix_padder.PadADescriptor_M_K(in_gemmmraw_gemmkraw_desc);
+        const auto M_raw = in_gemmmraw_gemmkraw_desc.GetLength(I0);
+        const auto K_raw = in_gemmmraw_gemmkraw_desc.GetLength(I1);
 
-        const auto M = in_gemmm_gemmk_desc.GetLength(I0);
-        const auto K = in_gemmm_gemmk_desc.GetLength(I1);
+        const index_t K0PerBlock = KPerBlock / AK1;
+        const index_t AK0 =
+            math::integer_divide_ceil(K_raw, AK1 * K0PerBlock * k_batch) * K0PerBlock;
 
-        const auto AK0 = K / AK1;
+        const index_t GemmKPad = k_batch * AK0 * AK1;
 
-        return transform_tensor_descriptor(in_gemmm_gemmk_desc,
-                                           make_tuple(make_unmerge_transform(make_tuple(AK0, AK1)),
-                                                      make_pass_through_transform(M)),
-                                           make_tuple(Sequence<1>{}, Sequence<0>{}),
-                                           make_tuple(Sequence<0, 2>{}, Sequence<1>{}));
+        const index_t M_padded = math::integer_divide_ceil(M_raw, MPerBlock) * MPerBlock;
+        const index_t M_pad    = M_padded - M_raw;
+        const index_t K_pad    = GemmKPad - K_raw;
+
+        const auto in_gemmm_gemmkpad_desc =
+            transform_tensor_descriptor(in_gemmmraw_gemmkraw_desc,
+                                        make_tuple(make_right_pad_transform(M_raw, M_pad),
+                                                   make_right_pad_transform(K_raw, K_pad)),
+                                        make_tuple(Sequence<0>{}, Sequence<1>{}),
+                                        make_tuple(Sequence<0>{}, Sequence<1>{}));
+
+        return transform_tensor_descriptor(
+            in_gemmm_gemmkpad_desc,
+            make_tuple(make_unmerge_transform(make_tuple(k_batch * AK0, AK1)),
+                       make_pass_through_transform(M_padded)),
+            make_tuple(Sequence<1>{}, Sequence<0>{}),
+            make_tuple(Sequence<0, 2>{}, Sequence<1>{}));
     }
 
     template <typename BLay>
     static auto
-    MakeBGridDescriptor_BK0_N_BK1(const ConvToGemmFwdTransformer& conv_to_gemm_transformer)
+    MakeBGridDescriptor_BK0_N_BK1(const ConvToGemmFwdTransformer& conv_to_gemm_transformer,
+                                  const index_t k_batch = 1)
     {
         namespace ctc = tensor_layout::convolution;
         using Layout  = std::conditional_t<
@@ -356,19 +380,32 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         const auto wei_gemmnraw_gemmkraw_desc =
             conv_to_gemm_transformer.template MakeBDescriptor_N_K<Layout>();
 
-        const auto wei_gemmn_gemmk_desc =
-            matrix_padder.PadBDescriptor_N_K(wei_gemmnraw_gemmkraw_desc);
+        const auto N_raw = wei_gemmnraw_gemmkraw_desc.GetLength(I0);
+        const auto K_raw = wei_gemmnraw_gemmkraw_desc.GetLength(I1);
 
-        const auto N = wei_gemmn_gemmk_desc.GetLength(I0);
-        const auto K = wei_gemmn_gemmk_desc.GetLength(I1);
+        const index_t K0PerBlock = KPerBlock / BK1;
+        const index_t BK0 =
+            math::integer_divide_ceil(K_raw, BK1 * K0PerBlock * k_batch) * K0PerBlock;
 
-        const auto BK0 = K / BK1;
+        const index_t GemmKPad = k_batch * BK0 * BK1;
 
-        return transform_tensor_descriptor(wei_gemmn_gemmk_desc,
-                                           make_tuple(make_unmerge_transform(make_tuple(BK0, BK1)),
-                                                      make_pass_through_transform(N)),
-                                           make_tuple(Sequence<1>{}, Sequence<0>{}),
-                                           make_tuple(Sequence<0, 2>{}, Sequence<1>{}));
+        const index_t N_padded = math::integer_divide_ceil(N_raw, NPerBlock) * NPerBlock;
+        const index_t N_pad    = N_padded - N_raw;
+        const index_t K_pad    = GemmKPad - K_raw;
+
+        const auto wei_gemmn_gemmkpad_desc =
+            transform_tensor_descriptor(wei_gemmnraw_gemmkraw_desc,
+                                        make_tuple(make_right_pad_transform(N_raw, N_pad),
+                                                   make_right_pad_transform(K_raw, K_pad)),
+                                        make_tuple(Sequence<0>{}, Sequence<1>{}),
+                                        make_tuple(Sequence<0>{}, Sequence<1>{}));
+
+        return transform_tensor_descriptor(
+            wei_gemmn_gemmkpad_desc,
+            make_tuple(make_unmerge_transform(make_tuple(k_batch * BK0, BK1)),
+                       make_pass_through_transform(N_padded)),
+            make_tuple(Sequence<1>{}, Sequence<0>{}),
+            make_tuple(Sequence<0, 2>{}, Sequence<1>{}));
     }
 
     template <typename ELay>
@@ -396,6 +433,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
     constexpr static ConvToGemmFwdTransformer dummy_conv_to_gemm_transformer;
     using EGridDesc_M_N =
         remove_cvref_t<decltype(MakeEGridDescriptor_M_N<ELayout>(dummy_conv_to_gemm_transformer))>;
+    using CElementwiseGridDesc_M_N = EGridDesc_M_N;
 
 #define GridwiseGemmV3TemplateParams                                                           \
     tensor_layout::gemm::RowMajor, tensor_layout::gemm::ColumnMajor,                           \
@@ -414,8 +452,25 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         CDEBlockTransferScalarPerVector_NPerBlock, BlkGemmPipeSched, BlkGemmPipelineVer,       \
         AComputeDataType, BComputeDataType
 
-    // Use appropriate gridwise gemm
-    using GridwiseGemm = GridwiseGemm_xdl_cshuffle_v3<GridwiseGemmV3TemplateParams>;
+#define GridwiseGemmV3SplitKTemplateParams                                                     \
+    tensor_layout::gemm::RowMajor, tensor_layout::gemm::ColumnMajor,                           \
+        tensor_layout::gemm::RowMajor, ADataType, BDataType, AccDataType, CShuffleDataType,    \
+        AccDataType, AElementwiseOperation, BElementwiseOperation, CDEElementwiseOperation,    \
+        GemmSpec, BlockSize, MPerBlock, NPerBlock, KPerBlock, AK1, BK1, MPerXDL, NPerXDL,      \
+        MXdlPerWave, NXdlPerWave, ABlockTransferThreadClusterLengths_AK0_M_AK1,                \
+        ABlockTransferThreadClusterArrangeOrder, ABlockTransferSrcAccessOrder,                 \
+        ABlockTransferSrcVectorDim, ABlockTransferSrcScalarPerVector,                          \
+        ABlockTransferDstScalarPerVector_AK1, false, ABlockLdsExtraM,                          \
+        BBlockTransferThreadClusterLengths_BK0_N_BK1, BBlockTransferThreadClusterArrangeOrder, \
+        BBlockTransferSrcAccessOrder, BBlockTransferSrcVectorDim,                              \
+        BBlockTransferSrcScalarPerVector, BBlockTransferDstScalarPerVector_BK1, false,         \
+        BBlockLdsExtraN, CShuffleMXdlPerWavePerShuffle, CShuffleNXdlPerWavePerShuffle,         \
+        CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock,                      \
+        CDEBlockTransferScalarPerVector_NPerBlock, BlkGemmPipeSched, BlkGemmPipelineVer,       \
+        AComputeDataType, BComputeDataType
+
+    using GridwiseGemm       = GridwiseGemm_xdl_cshuffle_v3<GridwiseGemmV3TemplateParams>;
+    using GridwiseGemmSplitK = GridwiseGemm_xdl_cshuffle_v3<GridwiseGemmV3SplitKTemplateParams>;
 
     using Block2TileMapElementwise = BlockToCTileMap_M00_N0_M01Adapt<NPerBlock, NPerBlock>;
 
@@ -489,6 +544,42 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                             I0,
                             I1>;
 
+    using GridwiseElementwiseOutputCast =
+        GridwiseElementwise<Tuple<CElementwiseGridDesc_M_N>,
+                            Tuple<CElementwiseGridDesc_M_N>,
+                            Tuple<const AccDataType*>,
+                            Tuple<EDataType*>,
+                            Block2TileMapElementwise,
+                            CDEElementwiseOperation,
+                            BlockSize,
+                            NPerBlock,
+                            NPerBlock,
+                            NPerBlock / ClusterLengthNPerBlock,
+                            NPerBlock / ClusterLengthNPerBlock,
+                            Sequence<0, 1>,
+                            Sequence<CDEBlockTransferScalarPerVector_NPerBlock>,
+                            Sequence<CDEBlockTransferScalarPerVector_NPerBlock>,
+                            I1,
+                            I1>;
+
+    using GridwiseElementwiseOutputTransposeCast =
+        GridwiseElementwise<Tuple<NHWGCTransposeDescType>,
+                            Tuple<NGCHWTransposeDescType>,
+                            Tuple<const AccDataType*>,
+                            Tuple<EDataType*>,
+                            Block2TileMapElementwise,
+                            CDEElementwiseOperation,
+                            BlockSize,
+                            NPerBlock,
+                            NPerBlock,
+                            NPerBlock / ClusterLengthNPerBlock,
+                            NPerBlock / ClusterLengthNPerBlock,
+                            Sequence<0, 1>,
+                            Sequence<CDEBlockTransferScalarPerVector_NPerBlock>,
+                            Sequence<1>,
+                            I1,
+                            I0>;
+
     static auto
     MakeEGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(const EGridDesc_M_N& e_grid_desc_m_n)
     {
@@ -498,6 +589,17 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
             e_grid_desc_m_n, GridwiseGemm::CalculateMBlock(M), GridwiseGemm::CalculateNBlock(N));
     }
 
+    static auto MakeEGridDescriptorSplitK_MBlock_MPerBlock_NBlock_NPerBlock(
+        const EGridDesc_M_N& e_grid_desc_m_n)
+    {
+        const index_t M = e_grid_desc_m_n.GetLength(I0);
+        const index_t N = e_grid_desc_m_n.GetLength(I1);
+        return GridwiseGemmSplitK::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(
+            e_grid_desc_m_n,
+            GridwiseGemmSplitK::CalculateMBlock(M),
+            GridwiseGemmSplitK::CalculateNBlock(N));
+    }
+
     // desc for blockwise copy
     using AGridDesc_AK0_M_AK1 = remove_cvref_t<decltype(MakeAGridDescriptor_AK0_M_AK1<ALayout>(
         dummy_conv_to_gemm_transformer))>;
@@ -505,6 +607,9 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         dummy_conv_to_gemm_transformer))>;
     using EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock =
         remove_cvref_t<decltype(MakeEGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(
+            EGridDesc_M_N{}))>;
+    using EGridDescSplitK_MBlock_MPerBlock_NBlock_NPerBlock =
+        remove_cvref_t<decltype(MakeEGridDescriptorSplitK_MBlock_MPerBlock_NBlock_NPerBlock(
             EGridDesc_M_N{}))>;
 
     // Argument
@@ -528,7 +633,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                  const std::array<index_t, NDimSpatial>& input_right_pads,
                  const AElementwiseOperation& a_element_op,
                  const BElementwiseOperation& b_element_op,
-                 const CDEElementwiseOperation& cde_element_op)
+                 const CDEElementwiseOperation& cde_element_op,
+                 ck::index_t split_k = 1)
             : p_a_grid_{},
               p_b_grid_{},
               p_e_grid_{static_cast<EDataType*>(p_e)},
@@ -546,6 +652,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
               input_left_pads_{input_left_pads},
               input_right_pads_{input_right_pads},
               num_group_{a_g_n_c_wis_lengths_[0]},
+              k_batch_{split_k},
               conv_to_gemm_transformer_{a_g_n_c_wis_lengths_,
                                         a_g_n_c_wis_strides_,
                                         b_g_k_c_xs_lengths_,
@@ -558,12 +665,13 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                                         input_right_pads_},
               conv_N_per_block_{conv_to_gemm_transformer_.N_},
               a_grid_desc_ak0_m_ak1_{
-                  MakeAGridDescriptor_AK0_M_AK1<ALayout>(conv_to_gemm_transformer_)},
+                  MakeAGridDescriptor_AK0_M_AK1<ALayout>(conv_to_gemm_transformer_, k_batch_)},
               b_grid_desc_bk0_n_bk1_{
-                  MakeBGridDescriptor_BK0_N_BK1<BLayout>(conv_to_gemm_transformer_)},
+                  MakeBGridDescriptor_BK0_N_BK1<BLayout>(conv_to_gemm_transformer_, k_batch_)},
               e_grid_desc_m_n_{
                   DeviceOp::MakeEGridDescriptor_M_N<ELayout>(conv_to_gemm_transformer_)},
               e_grid_desc_mblock_mperblock_nblock_nperblock_{},
+              e_grid_desc_splitk_mblock_mperblock_nblock_nperblock_{},
               compute_ptr_offset_of_groups_{},
               compute_ptr_offset_of_n_{},
               a_element_op_{a_element_op},
@@ -582,8 +690,30 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
             compute_ptr_offset_of_groups_.BatchStrideE_ = e_g_n_k_wos_strides_[0];
             compute_ptr_offset_of_n_.BatchStrideE_ = e_g_n_k_wos_strides_[1] * conv_N_per_block_;
 
-            e_grid_desc_mblock_mperblock_nblock_nperblock_ =
-                MakeEGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(e_grid_desc_m_n_);
+            if(k_batch_ > 1)
+            {
+                e_grid_desc_splitk_mblock_mperblock_nblock_nperblock_ =
+                    MakeEGridDescriptorSplitK_MBlock_MPerBlock_NBlock_NPerBlock(e_grid_desc_m_n_);
+            }
+            else
+            {
+                e_grid_desc_mblock_mperblock_nblock_nperblock_ =
+                    MakeEGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(e_grid_desc_m_n_);
+            }
+
+            ConvToGemmFwdTransformer conv_to_gemm_transformer_elementwise{a_g_n_c_wis_lengths,
+                                                                          a_g_n_c_wis_strides,
+                                                                          b_g_k_c_xs_lengths,
+                                                                          b_g_k_c_xs_strides,
+                                                                          e_g_n_k_wos_lengths,
+                                                                          e_g_n_k_wos_strides,
+                                                                          conv_filter_strides_,
+                                                                          conv_filter_dilations_,
+                                                                          input_left_pads_,
+                                                                          input_right_pads_};
+
+            ce_elementwise_grid_desc_m_n_ =
+                DeviceOp::MakeEGridDescriptor_M_N<ELayout>(conv_to_gemm_transformer_elementwise);
 
             if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
                          is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
@@ -617,6 +747,14 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                 elementwise_block_2_ctile_map_transpose_e_ = Block2TileMapElementwise{
                     e_in_transpose_desc_.GetLength(I0), e_in_transpose_desc_.GetLength(I1)};
             }
+
+            elementwise_block_2_ctile_map_ =
+                is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
+                        is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>()
+                    ? Block2TileMapElementwise{e_in_transpose_desc_.GetLength(I0),
+                                               e_in_transpose_desc_.GetLength(I1)}
+                    : Block2TileMapElementwise{e_grid_desc_m_n_.GetLength(I0),
+                                               e_grid_desc_m_n_.GetLength(I1)};
         }
 
         std::size_t GetWorkspaceATensorSizeBytes() const
@@ -653,23 +791,37 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
 
         std::size_t GetWorkspaceETensorSizeBytes() const
         {
+            const long_index_t e_accum = ck::accumulate_n<long_index_t>(
+                e_g_n_k_wos_lengths_.begin(), NDimSpatial + I3, 1, std::multiplies<>());
+
+            if(k_batch_ > 1)
+            {
+                return math::integer_divide_ceil(sizeof(AccDataType) * e_accum, 128) * 128;
+            }
+
             if constexpr(is_NGCHW_NGKHW<ALayout, BLayout, ELayout>() ||
                          is_NGCDHW_NGKDHW<ALayout, BLayout, ELayout>())
             {
-                const long_index_t e_accum = ck::accumulate_n<long_index_t>(
-                    e_g_n_k_wos_lengths_.begin(), NDimSpatial + I3, 1, std::multiplies<>());
-                return sizeof(EDataType) * e_accum;
+                return math::integer_divide_ceil(sizeof(EDataType) * e_accum, 128) * 128;
             }
-            else
-            {
-                return 0;
-            }
+
+            return 0;
         }
 
         std::size_t GetWorkspaceSizeBytes() const
         {
-            return GetWorkspaceATensorSizeBytes() + GetWorkspaceBTensorSizeBytes() +
-                   GetWorkspaceETensorSizeBytes();
+            std::size_t total = GetWorkspaceETensorSizeBytes();
+
+            if constexpr(is_NGCHW_NGKHW<ALayout, BLayout, ELayout>() ||
+                         is_NGCDHW_NGKDHW<ALayout, BLayout, ELayout>() ||
+                         is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
+                         is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
+            {
+                total += GetWorkspaceATensorSizeBytes();
+                total += GetWorkspaceBTensorSizeBytes();
+            }
+
+            return total;
         }
 
         void Print() const
@@ -700,6 +852,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         // tensor descriptors for problem definiton
         index_t num_group_;
 
+        const index_t k_batch_;
+
         ConvToGemmFwdTransformer conv_to_gemm_transformer_;
 
         index_t conv_N_per_block_;
@@ -708,7 +862,10 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         AGridDesc_AK0_M_AK1 a_grid_desc_ak0_m_ak1_;
         BGridDesc_BK0_N_BK1 b_grid_desc_bk0_n_bk1_;
         EGridDesc_M_N e_grid_desc_m_n_;
+        CElementwiseGridDesc_M_N ce_elementwise_grid_desc_m_n_;
         EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock e_grid_desc_mblock_mperblock_nblock_nperblock_;
+        EGridDescSplitK_MBlock_MPerBlock_NBlock_NPerBlock
+            e_grid_desc_splitk_mblock_mperblock_nblock_nperblock_;
 
         // for computing batch offset
         ComputePtrOffsetOfStridedBatch<I1, I1, I0> compute_ptr_offset_of_groups_;
@@ -720,6 +877,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         CDEElementwiseOperation cde_element_op_;
 
         // block-to-e-tile map
+        Block2TileMapElementwise elementwise_block_2_ctile_map_;
         Block2TileMapElementwise elementwise_block_2_ctile_map_transpose_a_,
             elementwise_block_2_ctile_map_transpose_b_, elementwise_block_2_ctile_map_transpose_e_;
 
@@ -755,11 +913,10 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                 arg.a_g_n_c_wis_lengths_[I1] / arg.conv_N_per_block_;
 
             index_t gdx, gdy, gdz;
-            std::tie(gdx, gdy, gdz) =
-                GridwiseGemm::CalculateGridSize(GemmM, GemmN, I1 /*arg.KBatch*/);
+            std::tie(gdx, gdy, gdz) = GridwiseGemm::CalculateGridSize(
+                GemmM, GemmN, I1, arg.num_group_ * num_workgroups_per_Conv_N);
 
-            gdy = arg.num_group_;
-            gdz = num_workgroups_per_Conv_N;
+            const auto num_k_per_block = arg.a_grid_desc_ak0_m_ak1_.GetLength(I0);
 
             index_t K_split                  = (GemmK + KPerBlock - 1) / KPerBlock * KPerBlock;
             const bool has_main_k_block_loop = GridwiseGemm::CalculateHasMainKBlockLoop(K_split);
@@ -771,13 +928,13 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
             if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
                          is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
             {
-                p_a_grid = type_convert<const ADataType*>(arg.p_workspace_);
-                p_b_grid = type_convert<const BDataType*>(arg.p_workspace_) +
-                           arg.GetWorkspaceATensorSizeBytes() / sizeof(BDataType);
-                p_e_grid =
-                    type_convert<EDataType*>(arg.p_workspace_) +
-                    (arg.GetWorkspaceATensorSizeBytes() + arg.GetWorkspaceBTensorSizeBytes()) /
-                        sizeof(EDataType);
+                p_e_grid = type_convert<EDataType*>(arg.p_workspace_);
+                p_a_grid = type_convert<const ADataType*>(arg.p_workspace_) +
+                           arg.GetWorkspaceETensorSizeBytes() / sizeof(ADataType);
+                p_b_grid =
+                    type_convert<const BDataType*>(arg.p_workspace_) +
+                    (arg.GetWorkspaceETensorSizeBytes() + arg.GetWorkspaceATensorSizeBytes()) /
+                        sizeof(BDataType);
             }
 
             typename GridwiseGemm::Argument gemm_arg{
@@ -813,7 +970,9 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                         arg.b_grid_desc_bk0_n_bk1_,
                         arg.e_grid_desc_mblock_mperblock_nblock_nperblock_,
                         arg.compute_ptr_offset_of_groups_,
-                        arg.compute_ptr_offset_of_n_);
+                        arg.compute_ptr_offset_of_n_,
+                        num_k_per_block,
+                        arg.num_group_);
                 }
                 else
                 {
@@ -828,7 +987,9 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                                                arg.b_grid_desc_bk0_n_bk1_,
                                                arg.e_grid_desc_mblock_mperblock_nblock_nperblock_,
                                                arg.compute_ptr_offset_of_groups_,
-                                               arg.compute_ptr_offset_of_n_);
+                                               arg.compute_ptr_offset_of_n_,
+                                               num_k_per_block,
+                                               arg.num_group_);
                 }
             };
 
@@ -1074,6 +1235,365 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
             return ave_time;
         }
 
+        float RunGemmSplitK(const Argument& arg, const StreamConfig& stream_config = StreamConfig{})
+        {
+            if(stream_config.log_level_ > 0)
+            {
+                arg.Print();
+            }
+
+            float ave_time = 0;
+
+            constexpr index_t minimum_occupancy =
+                BlkGemmPipeSched == BlockGemmPipelineScheduler::Intrawave ? 1 : 2;
+
+            const index_t GemmM = arg.a_grid_desc_ak0_m_ak1_.GetLength(I1);
+            const index_t GemmN = arg.b_grid_desc_bk0_n_bk1_.GetLength(I1);
+            const index_t GemmK =
+                arg.a_grid_desc_ak0_m_ak1_.GetLength(I0) * arg.a_grid_desc_ak0_m_ak1_.GetLength(I2);
+
+            const index_t num_workgroups_per_Conv_N =
+                arg.a_g_n_c_wis_lengths_[I1] / arg.conv_N_per_block_;
+
+            index_t gdx, gdy, gdz;
+            std::tie(gdx, gdy, gdz) = GridwiseGemm::CalculateGridSize(
+                GemmM, GemmN, arg.k_batch_, arg.num_group_ * num_workgroups_per_Conv_N);
+
+            const auto num_k_per_block = arg.a_grid_desc_ak0_m_ak1_.GetLength(I0) / arg.k_batch_;
+
+            index_t k_grain = arg.k_batch_ * KPerBlock;
+            index_t K_split = (GemmK + k_grain - 1) / k_grain * KPerBlock;
+            const bool has_main_k_block_loop =
+                GridwiseGemmSplitK::CalculateHasMainKBlockLoop(K_split);
+
+            const ADataType* p_a_grid = arg.p_a_grid_;
+            const BDataType* p_b_grid = arg.p_b_grid_;
+            AccDataType* p_acc_grid   = type_convert<AccDataType*>(arg.p_workspace_);
+
+            if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
+                         is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
+            {
+                p_a_grid = type_convert<const ADataType*>(arg.p_workspace_) +
+                           arg.GetWorkspaceETensorSizeBytes() / sizeof(ADataType);
+                p_b_grid =
+                    type_convert<BDataType*>(arg.p_workspace_) +
+                    (arg.GetWorkspaceETensorSizeBytes() + arg.GetWorkspaceATensorSizeBytes()) /
+                        sizeof(BDataType);
+            }
+
+            typename GridwiseGemmSplitK::Argument gemm_arg{
+                p_a_grid, p_b_grid, p_acc_grid, GemmM, GemmN, GemmK, I0, I0, I0, arg.k_batch_};
+
+            const auto clear_workspace = [&]() {
+                hip_check_error(hipMemsetAsync(gemm_arg.p_c_grid,
+                                               0,
+                                               arg.GetWorkspaceETensorSizeBytes(),
+                                               stream_config.stream_id_));
+            };
+
+            const auto Run = [&](const auto& kernel) {
+                if(stream_config.flush_cache)
+                {
+                    typename GridwiseGemmSplitK::Argument gemm_arg_ = gemm_arg;
+                    ck::utility::RotatingMemWrapper<typename GridwiseGemmSplitK::Argument>
+                        rotating_mem(gemm_arg_,
+                                     stream_config.rotating_count,
+                                     gemm_arg_.M * gemm_arg_.K * sizeof(ADataType),
+                                     gemm_arg_.K * gemm_arg_.N * sizeof(BDataType));
+                    rotating_mem.Print();
+
+                    auto run_flush_cache = [&]() {
+                        // flush icache
+                        ck::utility::flush_icache();
+                        // rotating mem
+                        rotating_mem.Next();
+                        clear_workspace();
+                    };
+
+                    ave_time += ck::utility::launch_and_time_kernel_with_preprocess<false>(
+                        stream_config,
+                        run_flush_cache,
+                        kernel,
+                        dim3(gdx, gdy, gdz),
+                        dim3(BlockSize),
+                        0,
+                        gemm_arg_,
+                        arg.a_grid_desc_ak0_m_ak1_,
+                        arg.b_grid_desc_bk0_n_bk1_,
+                        arg.e_grid_desc_splitk_mblock_mperblock_nblock_nperblock_,
+                        arg.compute_ptr_offset_of_groups_,
+                        arg.compute_ptr_offset_of_n_,
+                        num_k_per_block,
+                        arg.num_group_);
+                }
+                else
+                {
+                    ave_time += launch_and_time_kernel_with_preprocess(
+                        stream_config,
+                        clear_workspace,
+                        kernel,
+                        dim3(gdx, gdy, gdz),
+                        dim3(BlockSize),
+                        0,
+                        gemm_arg,
+                        arg.a_grid_desc_ak0_m_ak1_,
+                        arg.b_grid_desc_bk0_n_bk1_,
+                        arg.e_grid_desc_splitk_mblock_mperblock_nblock_nperblock_,
+                        arg.compute_ptr_offset_of_groups_,
+                        arg.compute_ptr_offset_of_n_,
+                        num_k_per_block,
+                        arg.num_group_);
+                }
+            };
+
+            if(has_main_k_block_loop)
+            {
+                // Tail number always full
+                if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v1 ||
+                             BlkGemmPipelineVer == BlockGemmPipelineVersion::v3)
+                {
+                    const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                        GridwiseGemmSplitK,
+                        DeviceOp::AGridDesc_AK0_M_AK1,
+                        DeviceOp::BGridDesc_BK0_N_BK1,
+                        DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                        ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                        true,
+                        InMemoryDataOperationEnum::Set,
+                        minimum_occupancy>;
+                    Run(kernel);
+                }
+                // Tail number could be One to Seven
+                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v2)
+                {
+                    if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) == TailNumber::One)
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::One>;
+                        Run(kernel);
+                    }
+                    else if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                            TailNumber::Full)
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::Full>;
+                        Run(kernel);
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 2)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Two)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Two>;
+                            Run(kernel);
+                        }
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 3)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Three)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Three>;
+                            Run(kernel);
+                        }
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 4)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Four)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Four>;
+                            Run(kernel);
+                        }
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 5)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Five)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Five>;
+                            Run(kernel);
+                        }
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 6)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Six)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Six>;
+                            Run(kernel);
+                        }
+                    }
+
+                    if constexpr(GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages > 7)
+                    {
+                        if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) ==
+                           TailNumber::Seven)
+                        {
+                            const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                                GridwiseGemmSplitK,
+                                DeviceOp::AGridDesc_AK0_M_AK1,
+                                DeviceOp::BGridDesc_BK0_N_BK1,
+                                DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                                ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                                true,
+                                InMemoryDataOperationEnum::AtomicAdd,
+                                minimum_occupancy,
+                                TailNumber::Seven>;
+                            Run(kernel);
+                        }
+                    }
+                }
+                // Tail number could be Odd or Even
+                else if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v4)
+                {
+                    if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) == TailNumber::Odd)
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::Odd>;
+                        Run(kernel);
+                    }
+                    else
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3_2lds<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::Even>;
+                        Run(kernel);
+                    }
+                }
+                else
+                {
+                    if(GridwiseGemmSplitK::CalculateKBlockLoopTailNum(K_split) == TailNumber::Odd)
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::Odd>;
+                        Run(kernel);
+                    }
+                    else
+                    {
+                        const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                            GridwiseGemmSplitK,
+                            DeviceOp::AGridDesc_AK0_M_AK1,
+                            DeviceOp::BGridDesc_BK0_N_BK1,
+                            DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                            ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                            true,
+                            InMemoryDataOperationEnum::AtomicAdd,
+                            minimum_occupancy,
+                            TailNumber::Even>;
+                        Run(kernel);
+                    }
+                }
+            }
+            else
+            {
+                // Tail number always 1
+                if constexpr(BlkGemmPipelineVer == BlockGemmPipelineVersion::v1)
+                {
+                    const auto kernel = kernel_grouped_conv_fwd_xdl_cshuffle_v3<
+                        GridwiseGemmSplitK,
+                        DeviceOp::AGridDesc_AK0_M_AK1,
+                        DeviceOp::BGridDesc_BK0_N_BK1,
+                        DeviceOp::EGridDesc_MBlock_MPerBlock_NBlock_NPerBlock,
+                        ComputePtrOffsetOfStridedBatch<I1, I1, I0>,
+                        false,
+                        InMemoryDataOperationEnum::AtomicAdd,
+                        minimum_occupancy>;
+                    Run(kernel);
+                }
+            }
+            return ave_time;
+        }
+
         float Run(const Argument& arg, const StreamConfig& stream_config = StreamConfig{})
         {
             float avg_time = 0.f;
@@ -1089,10 +1609,13 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                         arg.elementwise_block_2_ctile_map_transpose_b_.CalculateGridSize(
                             arg.b_in_transpose_desc_);
 
-                    ADataType* p_a_out_grid = type_convert<ADataType*>(arg.p_workspace_);
+                    ADataType* p_a_out_grid =
+                        type_convert<ADataType*>(arg.p_workspace_) +
+                        arg.GetWorkspaceETensorSizeBytes() / sizeof(ADataType);
                     BDataType* p_b_out_grid =
                         type_convert<BDataType*>(arg.p_workspace_) +
-                        arg.GetWorkspaceATensorSizeBytes() / sizeof(BDataType);
+                        (arg.GetWorkspaceETensorSizeBytes() + arg.GetWorkspaceATensorSizeBytes()) /
+                            sizeof(BDataType);
 
                     auto kernel_transpose =
                         kernel_elementwise_dual<GridwiseElementwiseInputTranspose,
@@ -1129,42 +1652,119 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                                                a_grid_size);
                 }
 
-                avg_time += RunGemm(arg, stream_config);
-
-                if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
-                             is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
+                if(arg.k_batch_ > 1)
                 {
-                    const index_t grid_size =
-                        arg.elementwise_block_2_ctile_map_transpose_e_.CalculateGridSize(
-                            arg.e_in_transpose_desc_);
+                    avg_time += RunGemmSplitK(arg, stream_config);
 
-                    const EDataType* p_e_in_grid =
-                        type_convert<EDataType*>(arg.p_workspace_) +
-                        (arg.GetWorkspaceATensorSizeBytes() + arg.GetWorkspaceBTensorSizeBytes()) /
-                            sizeof(EDataType);
+                    const AccDataType* p_c_grid =
+                        type_convert<const AccDataType*>(arg.p_workspace_);
 
-                    EDataType* p_e_out_grid = arg.p_e_grid_;
+                    std::array<index_t, I1> in_out_batch_strides = {
+                        static_cast<index_t>(arg.compute_ptr_offset_of_groups_.BatchStrideE_)};
 
-                    auto kernel_transpose = kernel_elementwise<GridwiseElementwiseOutputTranspose,
-                                                               ck::Tuple<NHWGCTransposeDescType>,
-                                                               ck::Tuple<NGCHWTransposeDescType>,
-                                                               ck::Tuple<const EDataType*>,
-                                                               ck::Tuple<EDataType*>,
-                                                               Block2TileMapElementwise,
-                                                               element_wise::PassThrough>;
+                    if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
+                                 is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
+                    {
+                        const index_t grid_size =
+                            arg.elementwise_block_2_ctile_map_.CalculateGridSize(
+                                arg.e_in_transpose_desc_);
 
-                    avg_time +=
-                        launch_and_time_kernel(stream_config,
-                                               kernel_transpose,
-                                               dim3(grid_size),
-                                               dim3(ElementwiseBlocksize),
-                                               0,
-                                               make_tuple(arg.e_in_transpose_desc_),
-                                               make_tuple(arg.e_out_transpose_desc_),
-                                               make_tuple(p_e_in_grid),
-                                               make_tuple(p_e_out_grid),
-                                               arg.elementwise_block_2_ctile_map_transpose_e_,
-                                               element_wise::PassThrough{});
+                        const auto kernel =
+                            kernel_elementwise<GridwiseElementwiseOutputTransposeCast,
+                                               ck::Tuple<NHWGCTransposeDescType>,
+                                               ck::Tuple<NGCHWTransposeDescType>,
+                                               ck::Tuple<const AccDataType*>,
+                                               ck::Tuple<EDataType*>,
+                                               Block2TileMapElementwise,
+                                               CDEElementwiseOperation>;
+
+                        avg_time += launch_and_time_kernel(stream_config,
+                                                           kernel,
+                                                           dim3(grid_size),
+                                                           dim3(BlockSize),
+                                                           0,
+                                                           make_tuple(arg.e_in_transpose_desc_),
+                                                           make_tuple(arg.e_out_transpose_desc_),
+                                                           make_tuple(p_c_grid),
+                                                           make_tuple(arg.p_e_grid_),
+                                                           arg.elementwise_block_2_ctile_map_,
+                                                           arg.cde_element_op_);
+                    }
+                    else
+                    {
+                        const index_t grid_size =
+                            arg.elementwise_block_2_ctile_map_.CalculateGridSize(
+                                arg.ce_elementwise_grid_desc_m_n_) *
+                            arg.num_group_;
+
+                        const auto kernel =
+                            kernel_batched_elementwise<GridwiseElementwiseOutputCast,
+                                                       Tuple<CElementwiseGridDesc_M_N>,
+                                                       Tuple<CElementwiseGridDesc_M_N>,
+                                                       Tuple<const AccDataType*>,
+                                                       Tuple<EDataType*>,
+                                                       Block2TileMapElementwise,
+                                                       CDEElementwiseOperation,
+                                                       I1,
+                                                       I1>;
+
+                        avg_time +=
+                            launch_and_time_kernel(stream_config,
+                                                   kernel,
+                                                   dim3(grid_size),
+                                                   dim3(BlockSize),
+                                                   0,
+                                                   make_tuple(arg.ce_elementwise_grid_desc_m_n_),
+                                                   make_tuple(arg.ce_elementwise_grid_desc_m_n_),
+                                                   make_tuple(p_c_grid),
+                                                   make_tuple(arg.p_e_grid_),
+                                                   arg.elementwise_block_2_ctile_map_,
+                                                   arg.cde_element_op_,
+                                                   arg.num_group_,
+                                                   in_out_batch_strides,
+                                                   in_out_batch_strides);
+                    }
+                }
+                else
+                {
+                    avg_time += RunGemm(arg, stream_config);
+
+                    if constexpr(is_NGCHW_GKCYX_NGKHW<ALayout, BLayout, ELayout>() ||
+                                 is_NGCDHW_GKCZYX_NGKDHW<ALayout, BLayout, ELayout>())
+                    {
+                        const index_t grid_size =
+                            arg.elementwise_block_2_ctile_map_transpose_e_.CalculateGridSize(
+                                arg.e_in_transpose_desc_);
+
+                        const EDataType* p_e_in_grid = type_convert<EDataType*>(arg.p_workspace_) +
+                                                       (arg.GetWorkspaceATensorSizeBytes() +
+                                                        arg.GetWorkspaceBTensorSizeBytes()) /
+                                                           sizeof(EDataType);
+
+                        EDataType* p_e_out_grid = arg.p_e_grid_;
+
+                        auto kernel_transpose =
+                            kernel_elementwise<GridwiseElementwiseOutputTranspose,
+                                               ck::Tuple<NHWGCTransposeDescType>,
+                                               ck::Tuple<NGCHWTransposeDescType>,
+                                               ck::Tuple<const EDataType*>,
+                                               ck::Tuple<EDataType*>,
+                                               Block2TileMapElementwise,
+                                               element_wise::PassThrough>;
+
+                        avg_time +=
+                            launch_and_time_kernel(stream_config,
+                                                   kernel_transpose,
+                                                   dim3(grid_size),
+                                                   dim3(ElementwiseBlocksize),
+                                                   0,
+                                                   make_tuple(arg.e_in_transpose_desc_),
+                                                   make_tuple(arg.e_out_transpose_desc_),
+                                                   make_tuple(p_e_in_grid),
+                                                   make_tuple(p_e_out_grid),
+                                                   arg.elementwise_block_2_ctile_map_transpose_e_,
+                                                   element_wise::PassThrough{});
+                    }
                 }
             }
             return avg_time;
@@ -1358,10 +1958,34 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         const index_t GemmK =
             arg.a_grid_desc_ak0_m_ak1_.GetLength(I0) * arg.a_grid_desc_ak0_m_ak1_.GetLength(I2);
 
-        typename GridwiseGemm::Argument gemm_arg{
-            nullptr, nullptr, nullptr, GemmM, GemmN, GemmK, I0, I0, I0, I1 /*KBatch*/};
+        if(arg.k_batch_ > 1)
+        {
+            if(!arg.p_workspace_)
+            {
+                if(ck::EnvIsEnabled(CK_ENV(CK_LOGGING)))
+                {
+                    std::cout << "Warning: Workspace for "
+                                 "DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3::Argument is not "
+                                 "allocated, use SetWorkSpacePointer."
+                              << std::endl;
+                }
+                return false;
+            }
 
-        return GridwiseGemm::CheckValidity(gemm_arg);
+            typename GridwiseGemmSplitK::Argument gemm_arg{
+                nullptr, nullptr, nullptr, GemmM, GemmN, GemmK, I0, I0, I0, arg.k_batch_};
+
+            const auto num_k_loop = gemm_arg.AK0 / (KPerBlock / AK1);
+            // if constexpr(BlkGemmPipelineVer != BlockGemmPipelineVersion::v1)
+            // {
+            if(num_k_loop <= GridwiseGemmSplitK::BlockwiseGemmPipe::PrefetchStages)
+            {
+                return false;
+            }
+            // }
+        }
+
+        return true;
     }
 
     bool IsSupportedArgument(const BaseArgument* p_arg) override
@@ -1388,7 +2012,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         const std::array<index_t, NDimSpatial>& input_right_pads,
         const AElementwiseOperation& a_element_op,
         const BElementwiseOperation& b_element_op,
-        const CDEElementwiseOperation& cde_element_op)
+        const CDEElementwiseOperation& cde_element_op,
+        const ck::index_t split_k = 1)
     {
         return Argument{p_as,
                         p_bs,
@@ -1408,7 +2033,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                         input_right_pads,
                         a_element_op,
                         b_element_op,
-                        cde_element_op};
+                        cde_element_op,
+                        split_k};
     }
 
     static auto
@@ -1432,7 +2058,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                  const std::array<long_index_t, NDimSpatial>& input_right_pads,
                  const AElementwiseOperation& a_element_op,
                  const BElementwiseOperation& b_element_op,
-                 const CDEElementwiseOperation& cde_element_op)
+                 const CDEElementwiseOperation& cde_element_op,
+                 const ck::index_t split_k = 1)
     {
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_lengths_i32;
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_strides_i32;
@@ -1481,7 +2108,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                         input_right_pads_i32,
                         a_element_op,
                         b_element_op,
-                        cde_element_op};
+                        cde_element_op,
+                        split_k};
     }
 
     static auto MakeInvoker() { return Invoker{}; }
@@ -1505,7 +2133,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
         const std::array<index_t, NDimSpatial>& input_right_pads,
         const AElementwiseOperation& a_element_op,
         const BElementwiseOperation& b_element_op,
-        const CDEElementwiseOperation& cde_element_op) override
+        const CDEElementwiseOperation& cde_element_op,
+        const ck::index_t split_k) override
     {
         return std::make_unique<Argument>(p_a,
                                           p_b,
@@ -1525,7 +2154,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                                           input_right_pads,
                                           a_element_op,
                                           b_element_op,
-                                          cde_element_op);
+                                          cde_element_op,
+                                          split_k);
     }
 
     std::unique_ptr<BaseArgument>
@@ -1549,7 +2179,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                         const std::array<long_index_t, NDimSpatial>& input_right_pads,
                         const AElementwiseOperation& a_element_op,
                         const BElementwiseOperation& b_element_op,
-                        const CDEElementwiseOperation& cde_element_op) override
+                        const CDEElementwiseOperation& cde_element_op,
+                        const ck::index_t split_k) override
     {
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_lengths_i32;
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_strides_i32;
@@ -1598,7 +2229,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle_V3
                                           input_right_pads_i32,
                                           a_element_op,
                                           b_element_op,
-                                          cde_element_op);
+                                          cde_element_op,
+                                          split_k);
     }
 
     std::unique_ptr<BaseInvoker> MakeInvokerPointer() override

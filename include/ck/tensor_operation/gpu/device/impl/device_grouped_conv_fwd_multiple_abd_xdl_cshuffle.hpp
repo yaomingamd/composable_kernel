@@ -179,7 +179,7 @@ __global__ void
         const long_index_t a_n_offset =
             amd_wave_read_first_lane(compute_ptr_offset_of_n.GetAPtrOffset(n_idx));
 
-        GridwiseGemm::template Run<HasMainKBlockLoop, InMemoryDataOperationEnum::Set>(
+        GridwiseGemm::template Run<HasMainKBlockLoop>(
             p_as_grid + a_group_offset + a_n_offset,
             p_bs_grid + b_group_offset,
             p_ds_grid_grp,
@@ -434,7 +434,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
     using GemmADataType = std::conditional_t<!isMultiA && isMultiB, Tuple<ADataType>, ADataType>;
     using GemmBDataType = std::conditional_t<!isMultiB && isMultiA, Tuple<BDataType>, BDataType>;
 
-#define GridwiseGemmMultiABDTemplateParameters                                                  \
+#define GridwiseGemmTemplateParameters                                                          \
     GemmADataType, GemmBDataType, AComputeDataType, AccDataType, CShuffleDataType, DsDataType,  \
         EDataType, AElementwiseOperation, BElementwiseOperation, CDEElementwiseOperation,       \
         InMemoryDataOperationEnum::Set, NumGemmKPrefetchStage, BlockSize, MPerBlock, NPerBlock, \
@@ -450,27 +450,11 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
         CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock,                       \
         CDEBlockTransferScalarPerVector_NPerBlock, LoopSched, PipelineVersion::v1,              \
         BComputeDataType
-
-#define GridwiseGemmTemplateParameters                                                         \
-    GemmADataType, GemmBDataType, AComputeDataType, AccDataType, CShuffleDataType, DsDataType, \
-        EDataType, AElementwiseOperation, BElementwiseOperation, CDEElementwiseOperation,      \
-        NumGemmKPrefetchStage, BlockSize, MPerBlock, NPerBlock, KPerBlock, AK1, BK1, MPerXDL,  \
-        NPerXDL, MXdlPerWave, NXdlPerWave, ABlockTransferThreadClusterLengths_AK0_M_AK1,       \
-        ABlockTransferThreadClusterArrangeOrder, ABlockTransferSrcAccessOrder,                 \
-        ABlockTransferSrcVectorDim, ABlockTransferSrcScalarPerVector,                          \
-        ABlockTransferDstScalarPerVector_AK1, false, ABlockLdsExtraM,                          \
-        BBlockTransferThreadClusterLengths_BK0_N_BK1, BBlockTransferThreadClusterArrangeOrder, \
-        BBlockTransferSrcAccessOrder, BBlockTransferSrcVectorDim,                              \
-        BBlockTransferSrcScalarPerVector, BBlockTransferDstScalarPerVector_BK1, false,         \
-        BBlockLdsExtraN, CShuffleMXdlPerWavePerShuffle, CShuffleNXdlPerWavePerShuffle,         \
-        CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock,                      \
-        CDEBlockTransferScalarPerVector_NPerBlock, LoopSched, PipelineVersion::v1,             \
-        BComputeDataType
     // Use appropriate gridwise gemm
-    using GridwiseGemm = std::conditional_t<
-        isMultiA || isMultiB,
-        GridwiseGemmMultipleABD_xdl_cshuffle<GridwiseGemmMultiABDTemplateParameters>,
-        GridwiseGemmMultipleD_xdl_cshuffle<GridwiseGemmTemplateParameters>>;
+    using GridwiseGemm =
+        std::conditional_t<isMultiA || isMultiB,
+                           GridwiseGemmMultipleABD_xdl_cshuffle<GridwiseGemmTemplateParameters>,
+                           GridwiseGemmMultipleD_xdl_cshuffle<GridwiseGemmTemplateParameters>>;
 
     // If ADataTypes or BDataTypes is tuple, user has to pass std::array with pointers.
     using APointers =
@@ -1510,8 +1494,11 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
         const std::array<index_t, NDimSpatial>& input_right_pads,
         const AElementwiseOperation& a_element_op,
         const BElementwiseOperation& b_element_op,
-        const CDEElementwiseOperation& cde_element_op)
+        const CDEElementwiseOperation& cde_element_op,
+        const ck::index_t split_k = 1)
     {
+        (void)split_k;
+
         return Argument{p_as,
                         p_bs,
                         p_ds,
@@ -1554,8 +1541,11 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                  const std::array<long_index_t, NDimSpatial>& input_right_pads,
                  const AElementwiseOperation& a_element_op,
                  const BElementwiseOperation& b_element_op,
-                 const CDEElementwiseOperation& cde_element_op)
+                 const CDEElementwiseOperation& cde_element_op,
+                 const ck::index_t split_k = 1)
     {
+        (void)split_k;
+
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_lengths_i32;
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_strides_i32;
         std::array<index_t, NDimSpatial + 3> b_g_k_c_xs_lengths_i32;
@@ -1627,8 +1617,11 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
         const std::array<index_t, NDimSpatial>& input_right_pads,
         const AElementwiseOperation& a_element_op,
         const BElementwiseOperation& b_element_op,
-        const CDEElementwiseOperation& cde_element_op) override
+        const CDEElementwiseOperation& cde_element_op,
+        const ck::index_t split_k) override
     {
+        (void)split_k;
+
         return std::make_unique<Argument>(p_as,
                                           p_bs,
                                           p_ds,
@@ -1671,8 +1664,10 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                         const std::array<long_index_t, NDimSpatial>& input_right_pads,
                         const AElementwiseOperation& a_element_op,
                         const BElementwiseOperation& b_element_op,
-                        const CDEElementwiseOperation& cde_element_op) override
+                        const CDEElementwiseOperation& cde_element_op,
+                        const ck::index_t split_k) override
     {
+        (void)split_k;
 
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_lengths_i32;
         std::array<index_t, NDimSpatial + 3> a_g_n_c_wis_strides_i32;
