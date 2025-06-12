@@ -241,15 +241,17 @@
 #endif
 
 #ifndef __HIP_DEVICE_COMPILE__ // for host code
-#ifdef CK_TILE_USE_OCP_FP8
-#define CK_TILE_USE_OCP_FP8 1
-#else
+#ifndef CK_TILE_USE_OCP_FP8
 #define CK_TILE_USE_OCP_FP8 0
 #endif
 #elif defined(__gfx950__) || defined(__gfx12__) // for GPU code
+#ifndef CK_TILE_USE_OCP_FP8
 #define CK_TILE_USE_OCP_FP8 1
+#endif
 #else // for GPU code
+#ifndef CK_TILE_USE_OCP_FP8
 #define CK_TILE_USE_OCP_FP8 0
+#endif
 #endif
 
 #ifndef CK_TILE_USE_BUFFER_ADDRESSING_BUILTIN
