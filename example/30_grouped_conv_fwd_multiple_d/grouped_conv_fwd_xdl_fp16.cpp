@@ -39,38 +39,65 @@ using DeviceConvFwdInstance =
         InElementOp,
         WeiElementOp,
         OutElementOp,
-        ConvSpec,    // ConvForwardSpecialization
-        GemmSpec,    // GemmSpecialization    
-        #if 0 // pass 1
+        ConvSpec, // ConvForwardSpecialization
+        GemmSpec, // GemmSpecialization
+#if 0             // pass 1
         1,   64,   32,    32,    32,   4,   4,   32,   32,    1,    1,   
        // ABlockTransferThreadClusterLengths_AK0_M_AK1   ABlockTransferThreadClusterArrangeOrder     ABlockTransferSrcAccessOrder    ABlockTransferSrcVectorDim     ABlockTransferSrcScalarPerVector     ABlockTransferDstScalarPerVector_AK1      ABlockLdsExtraM  
         S<8, 8, 1>,     S<0, 2, 1>,     S<0, 2, 1>,             1,              4,              4,         1,     
         S<8, 8, 1>,     S<1, 0, 2>,     S<1, 0, 2>,             2,              4,              4,         1,
         1,           1,
         S<1, 8, 1, 8>,               1>;
-      #endif
-        #if 1
-        1,   256,   128,    64,    32,   4,   8,   32,   32,    2,    1,   
-       // ABlockTransferThreadClusterLengths_AK0_M_AK1   ABlockTransferThreadClusterArrangeOrder     ABlockTransferSrcAccessOrder    ABlockTransferSrcVectorDim     ABlockTransferSrcScalarPerVector     ABlockTransferDstScalarPerVector_AK1      ABlockLdsExtraM  
-        S<8, 32, 1>,     S<0, 2, 1>,     S<0, 2, 1>,             1,              4,              4,         1,     
-        S<4, 64, 1>,     S<1, 0, 2>,     S<1, 0 , 2>,            2,              8,              8,         1,
-        1,           1,
-         S<1, 32, 1, 8>,               1>;
-         #endif
+#endif
+#if 1
+        1,
+        256,
+        128,
+        64,
+        32,
+        4,
+        8,
+        32,
+        32,
+        2,
+        1,
+        // ABlockTransferThreadClusterLengths_AK0_M_AK1   ABlockTransferThreadClusterArrangeOrder
+        // ABlockTransferSrcAccessOrder    ABlockTransferSrcVectorDim
+        // ABlockTransferSrcScalarPerVector     ABlockTransferDstScalarPerVector_AK1 ABlockLdsExtraM
+        S<8, 32, 1>,
+        S<0, 2, 1>,
+        S<0, 2, 1>,
+        1,
+        4,
+        4,
+        1,
+        S<4, 64, 1>,
+        S<1, 0, 2>,
+        S<1, 0, 2>,
+        2,
+        8,
+        8,
+        1,
+        1,
+        1,
+        S<1, 32, 1, 8>,
+        1>;
+#endif
 #else
 constexpr ck::index_t NDimSpatial = 2;
-using ALayout = InputLayout<NDimSpatial>;
-using BLayout = WeightLayout<NDimSpatial>;
-using ELayout = OutputLayout<NDimSpatial>;
-using DsLayout =  ck::Tuple<>;
-using DsDataTypes =  ck::Tuple<>;
-using F16 = FP16;
-using F32 = FP32;
-constexpr auto GemmMNKPadding = GemmSpec;
-//using DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle = ck::tensor_operation::device::DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle;
+using ALayout                     = InputLayout<NDimSpatial>;
+using BLayout                     = WeightLayout<NDimSpatial>;
+using ELayout                     = OutputLayout<NDimSpatial>;
+using DsLayout                    = ck::Tuple<>;
+using DsDataTypes                 = ck::Tuple<>;
+using F16                         = FP16;
+using F32                         = FP32;
+constexpr auto GemmMNKPadding     = GemmSpec;
+// using DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle =
+// ck::tensor_operation::device::DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle;
 
 using DeviceConvFwdFactory = std::tuple<
-   // clang-format off
+    // clang-format off
   //########################################|     NumDim|      A|      B|          Ds|      E| AData| BData| AccData| CShuffle|          Ds| EData|           A|           B|         CDE|    ConvForward|           GEMM| NumGemmK| Block|  MPer|  NPer|  KPer| AK1| BK1| MPer| NPer| MXdl| NXdl|  ABlockTransfer| ABlockTransfer| ABlockTransfer| ABlockTransfer| ABlockTransfer| ABlockTransfer| ABlockLds|  BBlockTransfer| BBlockTransfer| BBlockTransfer| BlockTransfer| BBlockTransfer| BBlockTransfer| BBlockLds|    CShuffle|    CShuffle| CBlockTransferClusterLengths|  CBlockTransfer|
   //########################################|    Spatial| Layout| Layout|      Layout| Layout|  Type|  Type|    Type| DataType|    DataType|  Type| Elementwise| Elementwise| Elementwise| Specialization| Specialization| Prefetch|  Size| Block| Block| Block|    |    |  XDL|  XDL|  Per|  Per|   ThreadCluster|  ThreadCluster| SrcAccessOrder|   SrcVectorDim|      SrcScalar|      DstScalar| AddExtraM|   ThreadCluster|  ThreadCluster| SrcAccessOrder|  SrcVectorDim|      SrcScalar|      DstScalar| AddExtraN| MXdlPerWave| NXdlPerWave|         _MBlock_MWaveMPerXdl| ScalarPerVector|
   //########################################|           |       |       |            |       |      |      |        |         |            |      |   Operation|   Operation|   Operation|               |               |    Stage|      |      |      |      |    |    |     |     | Wave| Wave| Lengths_K0_M_K1|   ArrangeOrder|               |               |      PerVector|   PerVector_K1|          | Lengths_K0_N_K1|   ArrangeOrder|               |              |      PerVector|   PerVector_K1|          |  PerShuffle|  PerShuffle|         _NBlock_NWaveNPerXdl|   _NWaveNPerXdl|

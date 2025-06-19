@@ -90,10 +90,10 @@ struct ExecutionConfig final
     bool time_kernel     = true;
 };
 
-#define DefaultConvParam                                                       \
-    ck::utils::conv::ConvParam                                                 \
-    {                                                                          \
-        2, 32, 2, 256, 192, {3, 3}, {71, 71}, {2, 2}, {1, 1}, {1, 1}, { 1, 1 } \
+#define DefaultConvParam                                                     \
+    ck::utils::conv::ConvParam                                               \
+    {                                                                        \
+        2, 32, 2, 256, 192, {3, 3}, {71, 71}, {2, 2}, {1, 1}, {1, 1}, {1, 1} \
     }
 
 inline void print_help_msg()
@@ -354,12 +354,11 @@ inline HostTensorDescriptor make_output_descriptor(const ck::utils::conv::ConvPa
     throw std::runtime_error("unsuppored # dim spatial");
 }
 
-
 template <typename DataType>
 void dump_tensor(const Tensor<DataType>& tensor, const char* str)
 {
-    //if(config.dump_tensor == false)
-       return;
+    // if(config.dump_tensor == false)
+    return;
     assert(tensor.GetNumOfDimension() >= 4 && tensor.GetNumOfDimension() <= 6);
     auto lengths = tensor.GetLengths();
     auto strides = tensor.GetStrides();
