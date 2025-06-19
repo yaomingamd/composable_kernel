@@ -77,7 +77,8 @@ template <typename GridwiseGemm,
           typename ComputePtrOffsetOfN,
           bool HasMainKBlockLoop,
           bool isMultiA,
-          bool isMultiB>
+          bool isMultiB,
+          bool CTranspose>
 __global__ void
 #if CK_USE_LAUNCH_BOUNDS
 __launch_bounds__(CK_MAX_THREAD_PER_BLOCK, CK_MIN_BLOCK_PER_CU)
@@ -100,7 +101,7 @@ __launch_bounds__(CK_MAX_THREAD_PER_BLOCK, CK_MIN_BLOCK_PER_CU)
         const ComputePtrOffsetOfG compute_ptr_offset_of_groups,
         const ComputePtrOffsetOfN compute_ptr_offset_of_n)
 {
-#if(!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx9__))
+#if (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx9__))
 
     // offset base pointer for each work-group
     const index_t g_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
@@ -172,13 +173,17 @@ __launch_bounds__(CK_MAX_THREAD_PER_BLOCK, CK_MIN_BLOCK_PER_CU)
     else
     {
         const long_index_t b_group_offset =
-            amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetAPtrOffset(g_idx));
+            CTranspose
+                ? amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetAPtrOffset(g_idx))
+                : amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetBPtrOffset(g_idx));
         const long_index_t a_group_offset =
-            amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetBPtrOffset(g_idx));
-
+            CTranspose
+                ? amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetBPtrOffset(g_idx))
+                : amd_wave_read_first_lane(compute_ptr_offset_of_groups.GetAPtrOffset(g_idx));
         const long_index_t b_n_offset =
-            amd_wave_read_first_lane(compute_ptr_offset_of_n.GetAPtrOffset(n_idx));
-        const long_index_t a_n_offset = 0;
+            CTranspose ? amd_wave_read_first_lane(compute_ptr_offset_of_n.GetAPtrOffset(n_idx)) : 0;
+        const long_index_t a_n_offset =
+            CTranspose ? 0 : amd_wave_read_first_lane(compute_ptr_offset_of_n.GetAPtrOffset(n_idx));
 
         GridwiseGemm::template Run<HasMainKBlockLoop, InMemoryDataOperationEnum::Set>(
             p_as_grid + a_group_offset + a_n_offset,
@@ -338,7 +343,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
 
     static constexpr bool isATensorColMajor =
         (ConvForwardSpecialization == ConvolutionForwardSpecialization::Filter1x1Stride1Pad0) &&
-        (NumGroupsToMerge == 1) &&
+        (ABlockTransferSrcVectorDim == 1) && (NumGroupsToMerge == 1) &&
         (is_NGCHW_NGKHW<ALayout, BLayout, ELayout>() ||
          is_NGCDHW_NGKDHW<ALayout, BLayout, ELayout>);
 
@@ -532,10 +537,10 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
         std::conditional_t<isMultiB, std::array<const void*, NumBTensor>&, const void*>;
     // Use Tuple for the both cases for GridPointer to initialize it in Argument constructor (not
     // in initializer list what is required for single const pointer).
-    using AGridPointer = remove_cvref_t<
-        decltype(GetAGridPointer < isMultiA || isMultiB, GridwiseGemm, ADataType > ())>;
-    using BGridPointer = remove_cvref_t<
-        decltype(GetBGridPointer < isMultiA || isMultiB, GridwiseGemm, BDataType > ())>;
+    using AGridPointer =
+        remove_cvref_t<decltype(GetAGridPointer<isMultiA || isMultiB, GridwiseGemm, ADataType>())>;
+    using BGridPointer =
+        remove_cvref_t<decltype(GetBGridPointer<isMultiA || isMultiB, GridwiseGemm, BDataType>())>;
 
     // desc for blockwise copy
     using AGridDesc_AK0_M_AK1 =
@@ -1057,7 +1062,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                         ComputePtrOffsetOfStridedBatch<NumATensor, I1, NumDTensor>,
                         has_main_loop,
                         isMultiA,
-                        isMultiB>;
+                        isMultiB,
+                        CTranspose>;
 
                     return launch_and_time_kernel(
                         stream_config,
@@ -1129,7 +1135,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                             ComputePtrOffsetOfStridedBatch<NumATensor, I1, NumDTensor>,
                             has_main_loop,
                             isMultiA,
-                            isMultiB>;
+                            isMultiB,
+                            CTranspose>;
 
                         return launch_and_time_kernel(
                             stream_config,
@@ -1172,7 +1179,8 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                             ComputePtrOffsetOfStridedBatch<NumATensor, I1, NumDTensor>,
                             has_main_loop,
                             isMultiA,
-                            isMultiB>;
+                            isMultiB,
+                            CTranspose>;
 
                         return launch_and_time_kernel(
                             stream_config,
@@ -1555,34 +1563,35 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
             }
         }
 
-        if constexpr(CTranspose)
-        {
-            const index_t output_spatial_acum = ck::accumulate_n<index_t>(
-                arg.e_g_n_k_wos_lengths_.begin() + I3, NDimSpatial, 1, std::multiplies<>());
-
-            if(output_spatial_acum % CDEBlockTransferScalarPerVector_NPerBlock != 0)
-            {
-                return false;
-            }
-        }
-
         if(!valid)
         {
             return false;
         }
 
         // check vector access of E
-        if constexpr((is_same_v<ELayout, ctc::G_NW_K> || is_same_v<ELayout, ctc::G_NHW_K> ||
-                      is_same_v<ELayout, ctc::G_NDHW_K> || is_same_v<ELayout, ctc::GNWK> ||
-                      is_same_v<ELayout, ctc::GNHWK> || is_same_v<ELayout, ctc::GNDHWK> ||
-                      is_same_v<ELayout, ctc::NWGK> || is_same_v<ELayout, ctc::NHWGK> ||
-                      is_same_v<ELayout, ctc::NDHWGK> || is_same_v<ELayout, ctc::NGKW> ||
-                      is_same_v<ELayout, ctc::NGKHW> || is_same_v<ELayout, ctc::NGKDHW>) &&
-                     (CTranspose == false))
+        if constexpr(is_same_v<ELayout, ctc::G_NW_K> || is_same_v<ELayout, ctc::G_NHW_K> ||
+                     is_same_v<ELayout, ctc::G_NDHW_K> || is_same_v<ELayout, ctc::GNWK> ||
+                     is_same_v<ELayout, ctc::GNHWK> || is_same_v<ELayout, ctc::GNDHWK> ||
+                     is_same_v<ELayout, ctc::NWGK> || is_same_v<ELayout, ctc::NHWGK> ||
+                     is_same_v<ELayout, ctc::NDHWGK> || is_same_v<ELayout, ctc::NGKW> ||
+                     is_same_v<ELayout, ctc::NGKHW> || is_same_v<ELayout, ctc::NGKDHW>)
         {
-            if(!(K % CDEBlockTransferScalarPerVector_NPerBlock == 0))
+            if(CTranspose == false)
             {
-                return false;
+                if(!(K % CDEBlockTransferScalarPerVector_NPerBlock == 0))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                const index_t output_spatial_acum = ck::accumulate_n<index_t>(
+                    arg.e_g_n_k_wos_lengths_.begin() + I3, NDimSpatial, 1, std::multiplies<>());
+
+                if(output_spatial_acum % CDEBlockTransferScalarPerVector_NPerBlock != 0)
+                {
+                    return false;
+                }
             }
         }
         else
