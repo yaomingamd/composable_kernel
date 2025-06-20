@@ -360,8 +360,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                                                             true /*SplitN*/,
                                                             ADataType,
                                                             EDataType,
-                                                            NumGroupsToMerge,
-                                                            false>;
+                                                            NumGroupsToMerge>;
 
     static constexpr index_t ClusterLengthNPerBlock =
         CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock::At(3);

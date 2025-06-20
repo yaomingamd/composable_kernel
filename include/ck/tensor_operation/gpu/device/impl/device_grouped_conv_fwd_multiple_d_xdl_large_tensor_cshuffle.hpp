@@ -207,7 +207,6 @@ struct DeviceGroupedConvFwdMultipleD_Xdl_CShuffle_Large_Tensor
                                                                   ADataType,
                                                                   EDataType,
                                                                   I1,
-                                                                  false,
                                                                   index_t>;
 
     using ConvToGemmFwdTransformerLongIndexT = TransformConvFwdToGemm<NDimSpatial,
@@ -216,7 +215,6 @@ struct DeviceGroupedConvFwdMultipleD_Xdl_CShuffle_Large_Tensor
                                                                       ADataType,
                                                                       EDataType,
                                                                       I1,
-                                                                      false,
                                                                       long_index_t>;
 
     static constexpr auto matrix_padder =
