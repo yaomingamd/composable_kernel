@@ -1294,16 +1294,16 @@ struct TransformConvFwdToGemm
 
     {
         static_assert(NumGroupsToMerge == 1);
-        static_assert(ForceSingleN);
+        //static_assert(ForceSingleN);
         static_assert(ConvForwardSpecialization ==
                       device::ConvolutionForwardSpecialization::Filter1x1Stride1Pad0);
 
         const auto in_gemmm_gemmk_desc = make_naive_tensor_descriptor(
-            make_tuple(Ho_, Wo_, C_), make_tuple(HiStride_, I1, CStrideTensorA_));
+            make_tuple(N_, Ho_ * Wo_, C_), make_tuple(NStrideTensorA_, I1, CStrideTensorA_));
 
         return transform_tensor_descriptor(
             in_gemmm_gemmk_desc,
-            make_tuple(make_merge_transform(make_tuple(Ho_, Wo_)), make_pass_through_transform(C_)),
+            make_tuple(make_merge_transform(make_tuple(N_, Ho_*  Wo_)), make_pass_through_transform(C_)),
             make_tuple(Sequence<0, 1>{}, Sequence<2>{}),
             make_tuple(Sequence<0>{}, Sequence<1>{}));
     }
@@ -1694,11 +1694,18 @@ struct TransformConvFwdToGemm
     __host__ __device__ auto MakeCDescriptor_M_N() const
     {
         static_assert(NumGroupsToMerge == 1);
-        static_assert(ForceSingleN);
+        //static_assert(ForceSingleN);
         if constexpr(CTranspose)
         {
-            return make_naive_tensor_descriptor(make_tuple(K_, Ho_ * Wo_),
-                                                make_tuple(KStrideTensorC_, I1));
+            auto n_k_hw_desc = make_naive_tensor_descriptor(make_tuple(N_, K_, Ho_ * Wo_),
+                                                make_tuple(NStrideTensorC_, KStrideTensorC_, I1));
+            return  transform_tensor_descriptor(
+                n_k_hw_desc,
+                make_tuple(make_pass_through_transform(K_),
+                           make_merge_transform(make_tuple(N_, Ho_ * Wo_))),
+                make_tuple(Sequence<1>{}, Sequence<0, 2>{}),
+                make_tuple(Sequence<0>{}, Sequence<1>{}));
+
         }
         else
         {

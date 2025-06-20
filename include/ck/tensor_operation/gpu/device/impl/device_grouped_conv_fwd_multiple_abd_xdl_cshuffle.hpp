@@ -361,7 +361,7 @@ struct DeviceGroupedConvFwdMultipleABD_Xdl_CShuffle
                                                             ADataType,
                                                             EDataType,
                                                             NumGroupsToMerge,
-                                                            isATensorColMajor>;
+                                                            false>;
 
     static constexpr index_t ClusterLengthNPerBlock =
         CDEBlockTransferClusterLengths_MBlock_MPerBlock_NBlock_NPerBlock::At(3);
