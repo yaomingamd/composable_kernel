@@ -536,7 +536,8 @@ struct DeviceGemmDl : public DeviceGemm<ALayout,
             }
         }
 
-        if(ck::get_device_name() == "gfx906" || ck::is_gfx103_supported() ||
+        if(ck::get_device_name() == "gfx906" || ck::get_device_name() == "gfx90a" ||
+           ck::is_gfx103_supported() ||
            ck::is_gfx11_supported() || ck::is_gfx12_supported())
         {
             return GridwiseGemm::CheckValidity(
