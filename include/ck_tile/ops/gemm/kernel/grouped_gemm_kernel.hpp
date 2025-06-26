@@ -127,8 +127,8 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
                 continue;
             }
 
-            const index_t stride_a = gemm_descs[i].stride_A;
-            const index_t stride_b = gemm_descs[i].stride_B;
+            const index_t stride_a = gemm_descs[i].stride_As[0];
+            const index_t stride_b = gemm_descs[i].stride_Bs[0];
             const index_t stride_e = gemm_descs[i].stride_E;
 
             const index_t grid_size_grp = TilePartitioner::GridSize(M, N) * gemm_descs[i].k_batch;
@@ -138,15 +138,15 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
 
             grid_size += grid_size_grp;
 
-            auto karg = GemmKernelArgs<>{type_convert<const ADataType*>(gemm_descs[i].a_ptr),
-                                         type_convert<const BDataType*>(gemm_descs[i].b_ptr),
+            auto karg = GemmKernelArgs<>{{type_convert<const ADataType*>(gemm_descs[i].as_ptr[0])},
+                                         {type_convert<const BDataType*>(gemm_descs[i].bs_ptr[0])},
                                          {},
                                          type_convert<CDataType*>(gemm_descs[i].e_ptr),
                                          M,
                                          N,
                                          K,
-                                         stride_a,
-                                         stride_b,
+                                         {stride_a},
+                                         {stride_b},
                                          {},
                                          stride_e,
                                          gemm_descs[i].k_batch};
@@ -193,9 +193,9 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
         const typename Base::SplitKBatchOffset splitk_batch_offset(kargs, block_idx_z);
 
         const ADataType* a_ptr =
-            static_cast<const ADataType*>(kargs.a_ptr) + splitk_batch_offset.a_k_split_offset;
+            static_cast<const ADataType*>(kargs.as_ptr[0]) + splitk_batch_offset.a_k_split_offset;
         const BDataType* b_ptr =
-            static_cast<const BDataType*>(kargs.b_ptr) + splitk_batch_offset.b_k_split_offset;
+            static_cast<const BDataType*>(kargs.bs_ptr[0]) + splitk_batch_offset.b_k_split_offset;
         CDataType* c_ptr = static_cast<CDataType*>(kargs.e_ptr);
 
         // allocate LDS
@@ -208,7 +208,8 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
         }
         else
         {
-            this->RunGemm(a_ptr, b_ptr, {}, c_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
+            this->RunGemm(
+                {a_ptr}, {b_ptr}, {}, c_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
         }
     }
 

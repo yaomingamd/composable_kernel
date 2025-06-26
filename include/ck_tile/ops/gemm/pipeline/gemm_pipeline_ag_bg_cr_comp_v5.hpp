@@ -114,9 +114,9 @@ struct GemmPipelineAgBgCrCompV5 : public BaseGemmPipelineAgBgCrCompV5<Problem>
                   typename BDramBlockWindowTmp,
                   typename BElementFunction>
         CK_TILE_DEVICE auto operator()(const ADramBlockWindowTmp& a_dram_block_window_tmp,
-                                       const AElementFunction& a_element_func,
+                                       [[maybe_unused]] const AElementFunction& a_element_func,
                                        const BDramBlockWindowTmp& b_dram_block_window_tmp,
-                                       const BElementFunction& b_element_func,
+                                       [[maybe_unused]] const BElementFunction& b_element_func,
                                        index_t num_loop,
                                        void* __restrict__ p_smem_0) const
         {
@@ -246,11 +246,11 @@ struct GemmPipelineAgBgCrCompV5 : public BaseGemmPipelineAgBgCrCompV5<Problem>
                     auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
                         Policy::template MakeShuffledARegTileDistribution<Problem>());
                     transpose_tile2d(a_shuffle_tmp, a_global_load_tile);
-                    Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp, a_element_func);
+                    Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
                 }
                 else
                 {
-                    Base::LocalPrefill(a_copy_lds_window, a_global_load_tile, a_element_func);
+                    Base::LocalPrefill(a_copy_lds_window, a_global_load_tile);
                 }
 
                 if constexpr(is_b_row_major)
@@ -258,11 +258,11 @@ struct GemmPipelineAgBgCrCompV5 : public BaseGemmPipelineAgBgCrCompV5<Problem>
                     auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
                         Policy::template MakeShuffledBRegTileDistribution<Problem>());
                     transpose_tile2d(b_shuffle_tmp, b_global_load_tile);
-                    Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp, b_element_func);
+                    Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
                 }
                 else
                 {
-                    Base::LocalPrefill(b_copy_lds_window, b_global_load_tile, b_element_func);
+                    Base::LocalPrefill(b_copy_lds_window, b_global_load_tile);
                 }
 
                 if(idx == 0)
