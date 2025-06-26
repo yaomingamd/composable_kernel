@@ -101,10 +101,36 @@ struct Rmsnorm2dFwdPipelineOnePass
             sweep_tile(x_resi, [&](auto idx) {
                 // compute x = x_resi + x
                 acc(idx) = type_convert<ComputeDataType>(x_resi(idx)) + acc(idx);
+
+                // To make norm input align with residual output
+                if constexpr(kFusedAdd == Rmsnorm2dFusedAddEnum::PRE_ADD_STORE)
+                {
+                    if constexpr(std::is_same_v<YResidualDataType, ck_tile::bf16_t>)
+                    {
+                        const auto tmp = float_to_bf16<bf16_rounding_mode::standard>(acc(idx));
+                    }
+                    else
+                    {
+                        const auto tmp = float_to_fp16(acc(idx));
+                    }
+                    acc(idx) = type_convert<ComputeDataType>(tmp);
+                }
             });
             if constexpr(kFusedAdd == Rmsnorm2dFusedAddEnum::PRE_ADD_STORE)
             {
-                store_tile(y_residual_window, cast_tile<YResidualDataType>(acc));
+                if constexpr(std::is_same_v<YResidualDataType, ck_tile::bf16_t>)
+                {
+                    store_tile(y_residual_window,
+                               tile_elementwise_in(
+                                   [&](const auto& v_) {
+                                       return float_to_bf16<bf16_rounding_mode::standard>(v_);
+                                   },
+                                   acc));
+                }
+                else
+                {
+                    store_tile(y_residual_window, cast_tile<YResidualDataType>(acc));
+                }
             }
         }
 
@@ -117,10 +143,7 @@ struct Rmsnorm2dFwdPipelineOnePass
 
         // compute inv-rms
         auto inv_rms = tile_elementwise_in(
-            [&](const auto& v_) {
-                return type_convert<ComputeDataType>(1.0f) / (sqrt(v_ / row_size + epsilon));
-            },
-            square_sum);
+            [&](const auto& v_) { return rsqrtf(v_ / row_size + epsilon); }, square_sum);
 
         if constexpr(kSaveInvRms)
             store_tile(inv_rms_window, cast_tile<InvRmsDataType>(inv_rms));
@@ -132,9 +155,7 @@ struct Rmsnorm2dFwdPipelineOnePass
             constexpr auto j_idx = make_tuple(idx[number<1>{}]);
 
             const auto gamma_ = type_convert<ComputeDataType>(gamma[j_idx]);
-
-            auto rmsn_ = acc[idx] * inv_rms_[i_idx] * gamma_;
-
+            const auto rmsn_  = acc[idx] * inv_rms_[i_idx] * gamma_;
             rmsn(idx) = rmsn_;
         });
 
@@ -163,7 +184,19 @@ struct Rmsnorm2dFwdPipelineOnePass
         }
         else
         {
-            Epilogue{}(y_window_, rmsn);
+            if constexpr(std::is_same_v<YDataType, ck_tile::bf16_t>)
+            {
+                store_tile(y_window_,
+                           tile_elementwise_in(
+                               [&](const auto& v_) {
+                                   return float_to_bf16<bf16_rounding_mode::standard>(v_);
+                               },
+                               rmsn));
+            }
+            else
+            {
+                Epilogue{}(y_window_, rmsn);
+            }
         }
     }
 };
