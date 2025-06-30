@@ -3,6 +3,23 @@
 
 #pragma once
 
+struct AddScale
+{
+    static constexpr auto I0 = ck::Number<0>{};
+    static constexpr auto I1 = ck::Number<1>{};
+    static constexpr auto I2 = ck::Number<2>{};
+    static constexpr auto I3 = ck::Number<3>{};
+
+    template <typename E, typename C, typename D0>
+    CK_TILE_HOST_DEVICE constexpr void
+    operator()(E& a, const C& a0, const D0& a1) const
+    {
+        a = scale * (a0 + a1);
+    }
+
+    float scale = 1.0;
+};
+
 struct MultiplyMultiply
 {
     template <typename E, typename C, typename D0, typename D1>

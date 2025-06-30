@@ -17,9 +17,12 @@ namespace ck_tile {
 template <typename Problem>
 struct BaseGemmPipelineAgBgCrMem
 {
-    using ADataType      = remove_cvref_t<typename Problem::ADataType>;
-    using BDataType      = remove_cvref_t<typename Problem::BDataType>;
+    using AsDataType      = remove_cvref_t<typename Problem::AsDataType>;
+    using BsDataType      = remove_cvref_t<typename Problem::BsDataType>;
     using BlockGemmShape = remove_cvref_t<typename Problem::BlockGemmShape>;
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<0, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<0, BsDataType>>;
 
     static_assert(!std::is_same_v<BDataType, pk_int4_t>, "Not implemented");
 
@@ -157,14 +160,19 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
     using Base             = BaseGemmPipelineAgBgCrMem<Problem>;
     using PipelineImplBase = GemmPipelineAgBgCrImplBase<Problem, Policy>;
 
-    using ADataType      = remove_cvref_t<typename Problem::ADataType>;
-    using BDataType      = remove_cvref_t<typename Problem::BDataType>;
-    using CDataType      = remove_cvref_t<typename Problem::CDataType>;
+    using AsDataType      = remove_cvref_t<typename Problem::AsDataType>;
+    using BsDataType      = remove_cvref_t<typename Problem::BsDataType>;
+    using EDataType      = remove_cvref_t<typename Problem::EDataType>;
     using BlockGemmShape = remove_cvref_t<typename Problem::BlockGemmShape>;
 
-    using ALayout = remove_cvref_t<typename Problem::ALayout>;
-    using BLayout = remove_cvref_t<typename Problem::BLayout>;
-    using CLayout = remove_cvref_t<typename Problem::CLayout>;
+    using AsLayout = remove_cvref_t<typename Problem::AsLayout>;
+    using BsLayout = remove_cvref_t<typename Problem::BsLayout>;
+    using ELayout = remove_cvref_t<typename Problem::ELayout>;
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<0, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<0, BsDataType>>;
+    using ALayout   = remove_cvref_t<std::tuple_element_t<0, AsLayout>>;
+    using BLayout   = remove_cvref_t<std::tuple_element_t<0, BsLayout>>;
 
     using BlockGemm = remove_cvref_t<decltype(Policy::template GetBlockGemm<Problem>())>;
 
@@ -235,6 +243,10 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
                                        index_t num_loop,
                                        void* p_smem) const
         {
+            static_assert(ADramBlockWindowTmp::size() == 1 && BDramBlockWindowTmp::size() == 1,
+                "The A/B DRAM block window should have a size of 1 "
+                "Currently, GemmPipelineAgBgCrMem supports only a single A/B DRAM block window.");
+
             static_assert(
                 std::is_same_v<ADataType, remove_cvref_t<typename ADramBlockWindowTmp::DataType>> &&
                     std::is_same_v<BDataType,
@@ -279,8 +291,7 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
             // A DRAM tile window for load
             // A LDS tile window for store
             // A LDS tile for block GEMM
-            auto a_windows =
-                Base::GetAWindows(a_dram_block_window_tmp, a_lds_block, a_lds_load_tile_distr);
+            auto a_windows = Base::GetAWindows(a_dram_block_window_tmp, a_lds_block, a_lds_load_tile_distr);
             auto& a_copy_dram_window = a_windows.at(I0{});
             auto& a_copy_lds_window  = a_windows.at(I1{});
             auto& a_lds_gemm_window  = a_windows.at(I2{});
@@ -288,8 +299,7 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
             // B DRAM tile window for load
             // B LDS tile window for store
             // B LDS tile for block GEMM
-            auto b_windows =
-                Base::GetBWindows(b_dram_block_window_tmp, b_lds_block, b_lds_load_tile_distr);
+            auto b_windows = Base::GetBWindows(b_dram_block_window_tmp, b_lds_block, b_lds_load_tile_distr);
             auto& b_copy_dram_window = b_windows.at(I0{});
             auto& b_copy_lds_window  = b_windows.at(I1{});
             auto& b_lds_gemm_window  = b_windows.at(I2{});
@@ -518,6 +528,10 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
                                        index_t num_loop,
                                        void* p_smem) const
         {
+            static_assert(ADramBlockWindowTmp::size() == 1 && BDramBlockWindowTmp::size() == 1,
+                "The A/B DRAM block window should have a size of 1 "
+                "Currently, GemmPipelineAgBgCrMem supports only a single A/B DRAM block window.");
+
             static_assert(
                 std::is_same_v<ADataType, remove_cvref_t<typename ADramBlockWindowTmp::DataType>> &&
                     std::is_same_v<BDataType,
@@ -805,7 +819,7 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
         const auto RunPipeline = [&](auto hot_loop_, auto tail_num_) {
             constexpr bool hot_loop    = hot_loop_.value;
             constexpr auto tail_num    = tail_num_.value;
-            constexpr auto PassThrough = [](const auto& x) { return x; };
+            constexpr auto PassThrough = [](auto &e, const auto& x) { e = x; };
             return PipelineImpl<Scheduler>{}.template operator()<hot_loop, tail_num>(
                 a_dram_block_window_tmp,
                 PassThrough,
@@ -825,9 +839,9 @@ struct GemmPipelineAgBgCrMem : public BaseGemmPipelineAgBgCrMem<Problem>
     {
         return PipelineImpl<Scheduler>{}.template operator()<HasHotLoop, TailNum>(
             a_dram_block_window_tmp,
-            [](const ADataType& a) { return a; },
+            [](auto &e, const ADataType& a) { e = a; },
             b_dram_block_window_tmp,
-            [](const BDataType& b) { return b; },
+            [](auto &e, const BDataType& b) { e = b; },
             num_loop,
             p_smem);
     }

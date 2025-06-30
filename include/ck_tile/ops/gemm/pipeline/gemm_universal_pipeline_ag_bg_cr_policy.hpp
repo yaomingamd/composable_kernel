@@ -375,7 +375,7 @@ struct UniversalGemmBasePolicy
 
         constexpr bool TransposeC = Problem::TransposeC;
         using ELayout             = typename Problem::ELayout;
-        using EWarpDstr           = typename WG::EWarpDstr;
+        using EWarpDstr           = typename WG::CWarpDstr;
 
         // N is contiguous dimension
         if constexpr(std::is_same_v<ELayout, tensor_layout::gemm::RowMajor>)
@@ -432,8 +432,6 @@ struct UniversalGemmBasePolicy
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto MakeADramTileDistribution()
     {
-        using AsLayout = remove_cvref_t<typename Problem::AsLayout>;
-
         constexpr index_t BlockSize = Problem::kBlockSize;
         constexpr index_t MPerBlock = Problem::BlockGemmShape::kM;
         constexpr index_t KPerBlock = Problem::BlockGemmShape::kK;
@@ -441,7 +439,7 @@ struct UniversalGemmBasePolicy
             Problem::FixedVectorSize ? Problem::VectorSizeA : GetVectorSizeA<Problem>();
         constexpr index_t NumWaveGroups = Problem::NumWaveGroups;
 
-        using ALayout = remove_cvref_t<std::tuple_element_t<number<0>{}, AsLayout>>;
+        using ALayout = remove_cvref_t<std::tuple_element_t<number<0>{}, remove_cvref_t<typename Problem::AsLayout>>>;
         // Tile: MPerBlock X KPerBlock
         if constexpr(std::is_same_v<ALayout, ck_tile::tensor_layout::gemm::RowMajor>)
         {
@@ -469,8 +467,6 @@ struct UniversalGemmBasePolicy
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto MakeBDramTileDistribution()
     {
-        using BsLayout = remove_cvref_t<typename Problem::BsLayout>;
-
         constexpr index_t BlockSize = Problem::kBlockSize;
         constexpr index_t NPerBlock = Problem::BlockGemmShape::kN;
         constexpr index_t KPerBlock = Problem::BlockGemmShape::kK;
@@ -478,7 +474,7 @@ struct UniversalGemmBasePolicy
             Problem::FixedVectorSize ? Problem::VectorSizeB : GetVectorSizeB<Problem>();
         constexpr index_t NumWaveGroups = Problem::NumWaveGroups;
 
-        using BLayout = remove_cvref_t<std::tuple_element_t<number<0>{}, BsLayout>>;
+        using BLayout = remove_cvref_t<std::tuple_element_t<number<0>{}, remove_cvref_t<typename Problem::BsLayout>>>;
         // Tile: KPerBlock X NPerBlock
         if constexpr(std::is_same_v<BLayout, ck_tile::tensor_layout::gemm::RowMajor>)
         {
@@ -506,7 +502,7 @@ struct UniversalGemmBasePolicy
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto MakeShuffledARegTileDistribution()
     {
-        using ALayout = remove_cvref_t<typename Problem::ALayout>;
+        using ALayout = remove_cvref_t<std::tuple_element_t<number<0>{},  remove_cvref_t<typename Problem::AsLayout>>>;
         static_assert(std::is_same_v<ALayout, ck_tile::tensor_layout::gemm::ColumnMajor>);
         constexpr index_t BlockSize     = Problem::kBlockSize;
         constexpr index_t MPerBlock     = Problem::BlockGemmShape::kM;
@@ -526,7 +522,7 @@ struct UniversalGemmBasePolicy
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto MakeShuffledBRegTileDistribution()
     {
-        using BLayout = remove_cvref_t<typename Problem::BLayout>;
+        using BLayout = remove_cvref_t<std::tuple_element_t<number<0>{}, remove_cvref_t<typename Problem::BsLayout>>>;
         static_assert(std::is_same_v<BLayout, ck_tile::tensor_layout::gemm::RowMajor>);
         constexpr index_t BlockSize     = Problem::kBlockSize;
         constexpr index_t NPerBlock     = Problem::BlockGemmShape::kN;

@@ -57,10 +57,10 @@ float gemm(const ck_tile::GemmHostArgs</*NumDTensor = 0*/>& args, const ck_tile:
     using TilePartitioner = ck_tile::GemmTile1DPartitioner<CodegenGemmShape>;
 
     using CodegenGemmTraits =
-        ck_tile::TileGemmTraits<kPadM, kPadN, kPadK, ALayout, BLayout, CLayout>;
+        ck_tile::TileGemmTraits<kPadM, kPadN, kPadK, ck_tile::tuple<ALayout>, ck_tile::tuple<BLayout>, CLayout>;
 
     using CodegenPipelineProblem = ck_tile::
-        GemmPipelineProblem<ADataType, BDataType, AccDataType, CodegenGemmShape, CodegenGemmTraits>;
+        GemmPipelineProblem<ck_tile::tuple<ADataType>, ck_tile::tuple<BDataType>, AccDataType, CodegenGemmShape, CodegenGemmTraits>;
 
     using CodegenGemmPipeline = ck_tile::GemmPipelineAGmemBGmemCRegV1<CodegenPipelineProblem>;
 
@@ -68,8 +68,8 @@ float gemm(const ck_tile::GemmHostArgs</*NumDTensor = 0*/>& args, const ck_tile:
         constexpr auto memory_operation = memory_operation_.value;
 
         using GemmEpilogue = ck_tile::CShuffleEpilogue<
-            ck_tile::CShuffleEpilogueProblem<ADataType,
-                                             BDataType,
+            ck_tile::CShuffleEpilogueProblem<ck_tile::tuple<ADataType>,
+                                             ck_tile::tuple<BDataType>,
                                              ck_tile::tuple<>,
                                              AccDataType,
                                              CDataType,

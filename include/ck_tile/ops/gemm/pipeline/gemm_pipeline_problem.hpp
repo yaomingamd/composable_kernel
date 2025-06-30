@@ -14,7 +14,9 @@ template <typename AsDataType_,
           typename EDataType_,
           typename BlockGemmShape_,
           typename Traits_,
-          typename ComputeDataType_ = AsDataType_,
+          typename AsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename BsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename ComputeDataType_ = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType_>>,
           bool FixedVectorSize_     = false,
           index_t VectorSizeA_      = 1,
           index_t VectorSizeB_      = 1>
@@ -34,6 +36,9 @@ struct GemmPipelineProblemBase
     using AsLayout = remove_cvref_t<typename Traits::AsLayout>;
     using BsLayout = remove_cvref_t<typename Traits::BsLayout>;
     using ELayout  = remove_cvref_t<typename Traits::ELayout>;
+
+    using AsElementWise   = remove_cvref_t<AsElementWise_>;
+    using BsElementWise   = remove_cvref_t<BsElementWise_>;
 
     using ADataType = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType>>;
     using ALayout   = remove_cvref_t<std::tuple_element_t<number<0>{}, AsLayout>>;
@@ -171,8 +176,9 @@ template <typename AsDataType_,
           typename EDataType_,
           typename BlockGemmShape_,
           typename Traits_,
-          typename ComputeDataType_ =
-              remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType_>>,
+          typename AsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename BsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename ComputeDataType_ = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType_>>,
           bool FixedVectorSize_ = false,
           index_t VectorSizeA_  = 1,
           index_t VectorSizeB_  = 1>
@@ -181,6 +187,8 @@ using GemmPipelineProblem = GemmPipelineProblemBase<AsDataType_,
                                                     EDataType_,
                                                     BlockGemmShape_,
                                                     Traits_,
+                                                    AsElementWise_,
+                                                    BsElementWise_,
                                                     ComputeDataType_,
                                                     FixedVectorSize_,
                                                     VectorSizeA_,
@@ -189,15 +197,14 @@ using GemmPipelineProblem = GemmPipelineProblemBase<AsDataType_,
 template <typename AsDataType_,
           typename BsDataType_,
           typename EDataType_,
-          typename AsElementWise_,
-          typename BsElementWise_,
           typename BlockGemmShape_,
           typename Traits_,
           GemmPipelineScheduler Scheduler_ = GemmPipelineScheduler::Intrawave,
           bool HasHotLoop_                 = true,
           TailNumber TailNum_              = TailNumber::Full,
-          typename ComputeDataType_ =
-              remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType_>>,
+          typename AsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename BsElementWise_ = ck_tile::element_wise::PassThrough,
+          typename ComputeDataType_ = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType_>>,
           bool FixedVectorSize_ = false,
           index_t VectorSizeA_  = 1,
           index_t VectorSizeB_  = 1>

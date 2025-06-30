@@ -37,13 +37,21 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
     using TilePartitioner  = remove_cvref_t<TilePartitioner_>;
     using GemmPipeline     = remove_cvref_t<GemmPipeline_>;
     using EpiloguePipeline = remove_cvref_t<EpiloguePipeline_>;
-    using ALayout          = remove_cvref_t<typename GemmPipeline::ALayout>;
-    using BLayout          = remove_cvref_t<typename GemmPipeline::BLayout>;
-    using ELayout          = remove_cvref_t<typename GemmPipeline::CLayout>;
+    using AsLayout          = remove_cvref_t<typename GemmPipeline::AsLayout>;
+    using BsLayout          = remove_cvref_t<typename GemmPipeline::BsLayout>;
+    using ELayout          = remove_cvref_t<typename GemmPipeline::ELayout>;
 
-    using ADataType = remove_cvref_t<typename GemmPipeline::ADataType>;
-    using BDataType = remove_cvref_t<typename GemmPipeline::BDataType>;
-    using CDataType = remove_cvref_t<typename EpiloguePipeline::ODataType>;
+    using AsDataType = remove_cvref_t<typename GemmPipeline::AsDataType>;
+    using BsDataType = remove_cvref_t<typename GemmPipeline::BsDataType>;
+    using EDataType = remove_cvref_t<typename EpiloguePipeline::ODataType>;
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<number<0>{}, BsDataType>>;
+    using ALayout = remove_cvref_t<std::tuple_element_t<number<0>{}, AsLayout>>;
+    using BLayout = remove_cvref_t<std::tuple_element_t<number<0>{}, BsLayout>>;
+
+    using AsElementWise = remove_cvref_t<typename GemmPipeline::AsElementWise>;
+    using BsElementWise = remove_cvref_t<typename GemmPipeline::BsElementWise>;
 
     using OffsetTile1DPartitioner = OffsettedTile1DPartitioner<TilePartitioner>;
     using Base                    = GemmKernel<TilePartitioner_, GemmPipeline_, EpiloguePipeline_>;
@@ -141,7 +149,7 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
             auto karg = GemmKernelArgs<>{{type_convert<const ADataType*>(gemm_descs[i].as_ptr[0])},
                                          {type_convert<const BDataType*>(gemm_descs[i].bs_ptr[0])},
                                          {},
-                                         type_convert<CDataType*>(gemm_descs[i].e_ptr),
+                                         type_convert<EDataType*>(gemm_descs[i].e_ptr),
                                          M,
                                          N,
                                          K,
@@ -193,10 +201,10 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
         const typename Base::SplitKBatchOffset splitk_batch_offset(kargs, block_idx_z);
 
         const ADataType* a_ptr =
-            static_cast<const ADataType*>(kargs.as_ptr[0]) + splitk_batch_offset.a_k_split_offset;
+            static_cast<const ADataType*>(kargs.as_ptr[0]) + splitk_batch_offset.as_k_split_offset[0];
         const BDataType* b_ptr =
-            static_cast<const BDataType*>(kargs.bs_ptr[0]) + splitk_batch_offset.b_k_split_offset;
-        CDataType* c_ptr = static_cast<CDataType*>(kargs.e_ptr);
+            static_cast<const BDataType*>(kargs.bs_ptr[0]) + splitk_batch_offset.bs_k_split_offset[0];
+        EDataType* c_ptr = static_cast<EDataType*>(kargs.e_ptr);
 
         // allocate LDS
         __shared__ char smem_ptr[GetSmemSize()];
@@ -204,7 +212,7 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
         if constexpr(UsePersistentKernel)
         {
             RunGemmWithPipelineSelection(
-                a_ptr, b_ptr, c_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
+                {a_ptr}, {b_ptr}, c_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
         }
         else
         {
@@ -231,9 +239,9 @@ struct GroupedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
      *
      */
     CK_TILE_DEVICE static void
-    RunGemmWithPipelineSelection(const ADataType* a_ptr,
-                                 const BDataType* b_ptr,
-                                 CDataType* c_ptr,
+    RunGemmWithPipelineSelection(const std::array<const ADataType*, AsDataType::size()>& a_ptr,
+                                 const std::array<const BDataType*, BsDataType::size()>& b_ptr,
+                                 EDataType* c_ptr,
                                  void* smem_ptr_0,
                                  const GemmKernelArgs<>& kargs,
                                  const typename Base::SplitKBatchOffset& splitk_batch_offset,

@@ -11,7 +11,6 @@ namespace ck_tile {
 
 struct BatchedGemmHostArgs : public ck_tile::GemmHostArgs<>
 {
-    CK_TILE_HOST BatchedGemmHostArgs() = delete;
     CK_TILE_HOST BatchedGemmHostArgs(const void* a_ptr_,
                                      const void* b_ptr_,
                                      void* c_ptr_,
@@ -58,16 +57,21 @@ struct BatchedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
 
     using GemmKernelArgs = typename ck_tile::GemmKernelArgs<>;
 
-    using ADataType = typename Base::ADataType;
-    using BDataType = typename Base::BDataType;
-    using CDataType = typename Base::EDataType;
+    using AsDataType = typename Base::AsDataType;
+    using BsDataType = typename Base::BsDataType;
+    using EDataType = typename Base::EDataType;
 
     using TilePartitioner  = typename Base::TilePartitioner;
     using GemmPipeline     = typename Base::GemmPipeline;
     using EpiloguePipeline = typename Base::EpiloguePipeline;
-    using ALayout          = typename Base::ALayout;
-    using BLayout          = typename Base::BLayout;
+    using AsLayout          = typename Base::AsLayout;
+    using BsLayout          = typename Base::BsLayout;
     using CLayout          = typename Base::ELayout;
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<number<0>{}, BsDataType>>;
+    using ALayout = remove_cvref_t<std::tuple_element_t<number<0>{}, AsLayout>>;
+    using BLayout = remove_cvref_t<std::tuple_element_t<number<0>{}, BsLayout>>;
 
     [[nodiscard]] CK_TILE_HOST static const std::string GetName()
     {
@@ -139,22 +143,22 @@ struct BatchedGemmKernel : public GemmKernel<TilePartitioner_, GemmPipeline_, Ep
         //  options
         const auto batch_stride_A = __builtin_amdgcn_readfirstlane(kargs.batch_stride_A);
         const auto batch_offset_A = __builtin_amdgcn_readfirstlane(i_batch * batch_stride_A);
-        const ADataType* a_ptr    = static_cast<const ADataType*>(kargs.a_ptr) + batch_offset_A +
-                                 splitk_batch_offset.a_k_split_offset;
+        const ADataType* a_ptr    = static_cast<const ADataType*>(kargs.as_ptr[0]) + batch_offset_A +
+                                 splitk_batch_offset.as_k_split_offset[0];
 
         const auto batch_stride_B = __builtin_amdgcn_readfirstlane(kargs.batch_stride_B);
         const auto batch_offset_B = __builtin_amdgcn_readfirstlane(i_batch * batch_stride_B);
-        const BDataType* b_ptr    = static_cast<const BDataType*>(kargs.b_ptr) + batch_offset_B +
-                                 splitk_batch_offset.b_k_split_offset;
+        const BDataType* b_ptr    = static_cast<const BDataType*>(kargs.bs_ptr[0]) + batch_offset_B +
+                                 splitk_batch_offset.bs_k_split_offset[0];
 
         const auto batch_stride_E = __builtin_amdgcn_readfirstlane(kargs.batch_stride_E);
-        const auto batch_offset_C = __builtin_amdgcn_readfirstlane(i_batch * batch_stride_E);
-        CDataType* c_ptr          = static_cast<CDataType*>(kargs.e_ptr) + batch_offset_C;
+        const auto batch_offset_E = __builtin_amdgcn_readfirstlane(i_batch * batch_stride_E);
+        EDataType* e_ptr          = static_cast<EDataType*>(kargs.e_ptr) + batch_offset_E;
 
         // allocate LDS
         __shared__ char smem_ptr[GetSmemSize()];
 
-        this->RunGemm({a_ptr}, {b_ptr}, {}, c_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
+        this->RunGemm({a_ptr}, {b_ptr}, {}, e_ptr, smem_ptr, kargs, splitk_batch_offset, i_m, i_n);
     }
 };
 

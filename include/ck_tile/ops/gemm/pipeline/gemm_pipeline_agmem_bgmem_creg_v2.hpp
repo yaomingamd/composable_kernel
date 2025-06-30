@@ -15,10 +15,16 @@ namespace ck_tile {
 template <typename Problem, typename Policy = GemmPipelineAGmemBGmemCRegV2DefaultPolicy>
 struct GemmPipelineAGmemBGmemCRegV2
 {
-    using ADataType      = remove_cvref_t<typename Problem::ADataType>;
-    using BDataType      = remove_cvref_t<typename Problem::BDataType>;
-    using CDataType      = remove_cvref_t<typename Problem::CDataType>;
+    using AsDataType      = remove_cvref_t<typename Problem::AsDataType>;
+    using BsDataType      = remove_cvref_t<typename Problem::BsDataType>;
+    using EDataType      = remove_cvref_t<typename Problem::EDataType>;
     using BlockGemmShape = remove_cvref_t<typename Problem::BlockGemmShape>;
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<0, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<0, BsDataType>>;
+
+    using AsElementWise  = remove_cvref_t<typename Problem::AsElementWise>;
+    using BsElementWise  = remove_cvref_t<typename Problem::BsElementWise>;
 
     static constexpr index_t APackedSize =
         ck_tile::numeric_traits<remove_cvref_t<ADataType>>::PackedSize;
@@ -60,13 +66,17 @@ struct GemmPipelineAGmemBGmemCRegV2
               typename BDramBlockWindowTmp,
               typename AElementFunction,
               typename BElementFunction>
-    CK_TILE_HOST_DEVICE auto operator()(const ADramBlockWindowTmp& a_dram_block_window_tmp,
+    CK_TILE_HOST_DEVICE auto operator()([[maybe_unused]]  const ADramBlockWindowTmp& a_dram_block_window_tmp,
                                         const AElementFunction& a_element_func,
-                                        const BDramBlockWindowTmp& b_dram_block_window_tmp,
+                                        [[maybe_unused]] const BDramBlockWindowTmp& b_dram_block_window_tmp,
                                         const BElementFunction& b_element_func,
                                         index_t num_loop,
                                         void* p_smem) const
     {
+        static_assert(ADramBlockWindowTmp::size() == 1 && BDramBlockWindowTmp::size() == 1,
+                "The A/B DRAM block window should have a size of 1 "
+                "Currently, GemmPipelineAgBgCrMem supports only a single A/B DRAM block window.");
+
         static_assert(
             std::is_same_v<ADataType, remove_cvref_t<typename ADramBlockWindowTmp::DataType>> &&
                 std::is_same_v<BDataType, remove_cvref_t<typename BDramBlockWindowTmp::DataType>>,

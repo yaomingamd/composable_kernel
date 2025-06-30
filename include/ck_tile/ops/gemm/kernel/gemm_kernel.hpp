@@ -152,10 +152,11 @@ struct GemmKernel
     using BsLayout         = remove_cvref_t<typename GemmPipeline::BsLayout>;
     using AsDataType       = remove_cvref_t<typename GemmPipeline::AsDataType>;
     using BsDataType       = remove_cvref_t<typename GemmPipeline::BsDataType>;
-    // TODO: GemmPipeline::CLayout -> GemmPipeline::ELayout will be changed for multi-ABD
+
     using ELayout    = remove_cvref_t<typename GemmPipeline::ELayout>;
     using DsLayout   = remove_cvref_t<typename EpiloguePipeline::DsLayout>;
     using DsDataType = remove_cvref_t<typename EpiloguePipeline::DsDataType>;
+    
     // Below type is actually accumulation data type - the output of block GEMM.
     using EDataType                          = remove_cvref_t<typename EpiloguePipeline::ODataType>;
     static constexpr index_t KernelBlockSize = GemmPipeline::BlockSize;
@@ -178,17 +179,17 @@ struct GemmKernel
     };
     static constexpr bool PersistentKernel = has_persistent_kernel::value;
 
-    static constexpr index_t NumATensor = AsDataType::size();
-    static constexpr index_t NumBTensor = BsDataType::size();
-    static constexpr index_t NumDTensor = DsDataType::size();
-    using ADataType = remove_cvref_t<std::tuple_element_t<number<0>{}, AsDataType>>;
-    using BDataType = remove_cvref_t<std::tuple_element_t<number<0>{}, BsDataType>>;
-    using DDataType = remove_cvref_t<std::tuple_element_t<number<0>{}, DsDataType>>;
-
     static constexpr auto I0 = number<0>();
     static constexpr auto I1 = number<1>();
     static constexpr auto I2 = number<2>();
     static constexpr auto I3 = number<3>{};
+
+    static constexpr index_t NumATensor = AsDataType::size();
+    static constexpr index_t NumBTensor = BsDataType::size();
+    static constexpr index_t NumDTensor = DsDataType::size();
+
+    using ADataType = remove_cvref_t<std::tuple_element_t<I0, AsDataType>>;
+    using BDataType = remove_cvref_t<std::tuple_element_t<I0, BsDataType>>;
 
     static_assert(AsLayout::size() == AsDataType::size(),
                   "The size of AsLayout and AsDataType should be the same");
@@ -279,7 +280,7 @@ struct GemmKernel
             });
 
             static_for<0, NumBTensor, 1>{}([&](auto index) {
-                using BiLayout = remove_cvref_t<std::tuple_element_t<index.value, AsLayout>>;
+                using BiLayout = remove_cvref_t<std::tuple_element_t<index.value, BsLayout>>;
                 if constexpr(std::is_same_v<tensor_layout::gemm::RowMajor, BiLayout>)
                 {
                     bs_k_split_offset[index] =
@@ -511,7 +512,7 @@ struct GemmKernel
     CK_TILE_DEVICE static auto
     MakeGemmTensorViews(const std::array<const ADataType*, NumATensor>& as_ptr,
                         const std::array<const BDataType*, NumBTensor>& bs_ptr,
-                        const std::array<const DDataType*, NumDTensor>& ds_ptr,
+                        const std::array<const void*, NumDTensor>& ds_ptr,
                         EDataType* e_ptr,
                         const KernelArgs& kargs,
                         const SplitKBatchOffset& splitk_batch_offset)
@@ -846,7 +847,7 @@ struct GemmKernel
     template <bool UseDefaultScheduler = true>
     CK_TILE_DEVICE static void RunGemm(const std::array<const ADataType*, NumATensor>& as_ptr,
                                        const std::array<const BDataType*, NumBTensor>& bs_ptr,
-                                       const std::array<const DDataType*, NumDTensor>& ds_ptr,
+                                       const std::array<const void*, NumDTensor>& ds_ptr,
                                        EDataType* e_ptr,
                                        void* smem_ptr_0,
                                        const KernelArgs& kargs,
@@ -907,7 +908,7 @@ struct GemmKernel
      */
     CK_TILE_DEVICE static void RunGemm2LDS(const std::array<const ADataType*, NumATensor>& as_ptr,
                                            const std::array<const BDataType*, NumBTensor>& bs_ptr,
-                                           const std::array<const DDataType*, NumDTensor>& ds_ptr,
+                                           const std::array<const void*, NumDTensor>& ds_ptr,
                                            EDataType* e_ptr,
                                            void* __restrict__ smem_ptr_0,
                                            void* __restrict__ smem_ptr_1,
@@ -972,10 +973,6 @@ struct GemmKernel
                         splitk_batch_offset.bs_k_split_offset[i];
         });
 
-        std::array<const DDataType*, NumDTensor> ds_ptr;
-        static_for<0, NumDTensor, 1>{}(
-            [&](auto i) { ds_ptr[i] = static_cast<const DDataType*>(kargs.ds_ptr[i]); });
-
         EDataType* e_ptr = static_cast<EDataType*>(kargs.e_ptr);
 
         // allocate LDS
@@ -990,7 +987,7 @@ struct GemmKernel
             {
                 RunGemm2LDS(as_ptr,
                             bs_ptr,
-                            ds_ptr,
+                            kargs.ds_ptr,
                             e_ptr,
                             smem_ptr_0,
                             smem_ptr_1,
@@ -1009,7 +1006,7 @@ struct GemmKernel
                 constexpr auto scheduler_type = (GemmPipeline::NumWaveGroups == 1);
                 RunGemm<scheduler_type>(as_ptr,
                                         bs_ptr,
-                                        ds_ptr,
+                                        kargs.ds_ptr,
                                         e_ptr,
                                         smem_ptr_0,
                                         kargs,
@@ -1054,10 +1051,6 @@ struct GemmKernel
                             splitk_batch_offset.bs_k_split_offset[i];
             });
 
-            std::array<const DDataType*, NumDTensor> ds_ptr;
-            static_for<0, NumDTensor, 1>{}(
-                [&](auto i) { ds_ptr[i] = static_cast<const DDataType*>(kargs.ds_ptr[i]); });
-
             EDataType* e_ptr = static_cast<EDataType*>(kargs.e_ptr);
 
             // allocate LDS
@@ -1073,7 +1066,7 @@ struct GemmKernel
                 {
                     RunGemm2LDS(as_ptr,
                                 bs_ptr,
-                                ds_ptr,
+                                kargs.ds_ptr,
                                 e_ptr,
                                 smem_ptr_0,
                                 smem_ptr_1,
@@ -1092,7 +1085,7 @@ struct GemmKernel
                 {
                     RunGemm(as_ptr,
                             bs_ptr,
-                            ds_ptr,
+                            kargs.ds_ptr,
                             e_ptr,
                             smem_ptr_0,
                             kargs,

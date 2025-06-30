@@ -102,8 +102,8 @@ int run_gemm_multi_abd_example_with_layouts(int argc,
     {
         return -1;
     }
-    using AElementWiseFn   = MultiplyMultiply;
-    using BElementWiseFn   = MultiplyMultiply;
+    using AElementWiseFn   = AddScale;
+    using BElementWiseFn   = AddScale;
     using CDEElementWiseFn = MultiplyMultiply;
     using AsLayout         = ck_tile::tuple<A0Layout, A1Layout>;
     using BsLayout         = ck_tile::tuple<B0Layout, B1Layout>;
@@ -233,27 +233,30 @@ int run_gemm_multi_abd_example_with_layouts(int argc,
 
     e_m_n_dev_buf.FromDevice(e_m_n_device_result.data());
 
-    ck_tile::HostTensor<A0DataType> a_m_k_host_ref(
+    ck_tile::HostTensor<A0DataType> a_m_k_host_ref_element_result(
         host_tensor_descriptor(M, K, StrideA0, is_row_major(a0_layout)));
-    ck_tile::HostTensor<B0DataType> b_k_n_host_ref(
+    ck_tile::HostTensor<B0DataType> b_k_n_host_ref_element_result(
         host_tensor_descriptor(K, N, StrideB0, is_row_major(b0_layout)));
     ck_tile::HostTensor<EDataType> e_m_n_host_ref(
         host_tensor_descriptor(M, N, StrideE, is_row_major(e_layout)));
-    a_m_k_host_ref.SetZero();
-    b_k_n_host_ref.SetZero();
+    a_m_k_host_ref_element_result.SetZero();
+    b_k_n_host_ref_element_result.SetZero();
     e_m_n_host_ref.SetZero();
 
-    // ck_tile::reference_gemm_multiple_abd<
-    //     A0DataType,
-    //     B0DataType,
-    //     DsDataType,
-    //     AccDataType,
-    //     EDataType,
-    //     AElementWiseFn,
-    //     BElementWiseFn,
-    //     CDEElementWiseFn>(
-    //     {a0_m_k_tesnor, a1_m_k_tesnor}, {b0_k_n_tensors, b1_k_n_tensors}, {d0_m_n_tensors,
-    //     d1_m_n_tensors}, a_m_k_host_ref, b_k_n_host_ref, e_m_n_host_ref);
+    ck_tile::reference_gemm_multiple_abd<AsDataType,
+                                           BsDataType,
+                                           DsDataType,
+                                           AccDataType,
+                                           EDataType,
+                                           AElementWiseFn,
+                                           BElementWiseFn,
+                                           CDEElementWiseFn>(
+            {a0_m_k_tesnor, a1_m_k_tesnor}, 
+            {b0_k_n_tensors, b1_k_n_tensors}, 
+            {d0_m_n_tensors, d1_m_n_tensors},
+             a_m_k_host_ref_element_result, 
+             b_k_n_host_ref_element_result, e_m_n_host_ref);
+
 
     bool pass{true};
     if(arg_parser.get_int("v"))

@@ -131,13 +131,13 @@ auto gemm_multi_abd(const gemm_multi_abd_kargs& args, const ck_tile::stream_conf
             using UniversalGemmProblem = ck_tile::UniversalGemmPipelineProblem<AsDataType,
                                                                                BsDataType,
                                                                                AccDataType,
-                                                                               AsElementWise,
-                                                                               BsElementWise,
                                                                                GemmShape,
                                                                                GemmUniversalTraits,
                                                                                scheduler,
                                                                                has_hot_loop_v,
-                                                                               tail_number_v>;
+                                                                               tail_number_v,
+                                                                               AsElementWise,
+                                                                               BsElementWise>;
 
             using GemmPipeline = GEMM_PIPELINE<UniversalGemmProblem>;
 
